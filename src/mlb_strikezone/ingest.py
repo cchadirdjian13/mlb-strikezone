@@ -1,6 +1,7 @@
 # ABOUTME: Pulls Statcast pitch-level data one month at a time and caches one
 # ABOUTME: parquet file per season under data/raw/. Never re-pulls an existing season.
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
 import pandas as pd
@@ -16,6 +17,20 @@ def month_ranges(year):
         yield date(year, m, 1), date(year, m + 1, 1) - timedelta(days=1)
 
 
+def _pull_month(year, start, end):
+    """Pull one month. Savant intermittently returns a body pybaseball cannot
+    parse; that is transient, so retry once and then fail loudly rather than
+    write a season quietly missing a month of games."""
+    for attempt in (1, 2):
+        try:
+            return statcast(start_dt=str(start), end_dt=str(end))
+        except pd.errors.ParserError:
+            if attempt == 2:
+                raise
+            print(f"{year}: unparseable response for {start} -> {end}, retrying")
+            time.sleep(5)
+
+
 def pull_season(year):
     RAW.mkdir(parents=True, exist_ok=True)
     out = RAW / f"statcast_{year}.parquet"
@@ -25,7 +40,7 @@ def pull_season(year):
     frames = []
     for start, end in month_ranges(year):
         print(f"{year}: pulling {start} -> {end}")
-        df = statcast(start_dt=str(start), end_dt=str(end))
+        df = _pull_month(year, start, end)
         if df is not None and len(df):
             frames.append(df)
     if not frames:
