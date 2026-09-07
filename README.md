@@ -261,6 +261,21 @@ precision moved the slope from −0.0134 to −0.0142 and changed no conclusion,
 which is its own small result: the season estimates are precise enough that it
 did not matter.
 
+## Poking at it yourself
+
+Everything above is a fixed view of the data. `app.py` is the interactive one —
+filter the leaderboard by role and sample floor, pull up any individual's season
+by season history, and redraw the zone for any count and batter side.
+
+![The Streamlit view](figures/streamlit_app.png)
+
+```bash
+uv run streamlit run src/mlb_strikezone/app.py
+```
+
+It reads only the generated parquet files, and says which pipeline step to run
+if one is missing rather than failing on an empty directory.
+
 ## Reproducing
 
 Python 3.12 via [uv](https://docs.astral.sh/uv/). Data is pulled from Baseball
@@ -304,6 +319,7 @@ uv run python src/mlb_strikezone/analysis.py --check
 uv run python src/mlb_strikezone/model.py --check
 uv run python src/mlb_strikezone/attribution.py --check
 uv run python src/mlb_strikezone/drift.py --check
+uv run python src/mlb_strikezone/app.py --check
 ```
 
 ## Limitations
@@ -335,8 +351,6 @@ The pipeline is complete end to end: ingest, called-pitch table, umpires,
 descriptive zone, model, attribution. What would sharpen it, roughly in order
 of value per unit of work:
 
-- **A Streamlit view** over `attribution.parquet` and the zone grids, so the
-  leaderboard and the count contours can be filtered rather than read.
 - **An unbiased interval on the season spreads.** The nested bootstrap's draws
   sit about 0.11 above the statistic — an artefact of resampling twice, since an
   inner bootstrap drawn from already-resampled games understates that
