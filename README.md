@@ -227,10 +227,17 @@ with two adjustments the result depends on entirely:
 
 ![Spread between people by season](figures/spread_by_season.png)
 
+Each season's spread carries a nested bootstrap interval, drawn as a band above:
+the outer loop resamples games, and because the spread is a variance with the
+estimation noise subtracted, every outer replicate has to re-estimate that noise
+from its own resampled games. Seasons are then weighted by their precision when
+the trend is fitted, so 2020's wide band does not pull the line like a full
+season's narrow one.
+
 | | 2015 | 2025 | slope per season |
 | --- | --- | --- | --- |
 | catchers | 1.27 | 0.80 | **−0.052 ± 0.010** |
-| umpires | 1.16 | 0.85 | −0.013 ± 0.008 |
+| umpires | 1.16 | 0.85 | −0.014 ± 0.008 |
 
 **The catcher spread has collapsed by about a third, and the trend is five
 standard errors from flat.** In 2017 the gap between a good and a bad framer was
@@ -239,12 +246,20 @@ priced skill over this period — teams that can measure it stop employing
 catchers who are bad at it — though this data can show only the compression, not
 the cause.
 
-**The umpire spread has not meaningfully moved.** The end points tempt a
+**The umpire spread is not established as moving.** The end points tempt a
 different story: 1.16 down to 0.85 reads as a 27% decline. But the slope is
-−0.013 ± 0.008, under two standard errors, and the middle of the series wobbles
-between 0.94 and 1.06 with no direction — 2023 and 2024 are both *higher* than
-2017. Two unusual end seasons are not a trend. Whatever has changed about the
-strike zone since 2015, umpires are not becoming more alike.
+−0.014 ± 0.008, and the middle of the series wobbles between 0.94 and 1.06 with
+no direction — 2023 and 2024 are both *higher* than 2017, and their bands
+overlap almost everything.
+
+That is 1.9 standard errors, which is short of the conventional bar but close
+enough that "umpires are not converging" would be overclaiming in the other
+direction. The honest reading is that eleven seasons cannot separate a slow
+umpire convergence from none at all, while the same eleven seasons settle the
+catcher question five times over. Weighting the seasons by their bootstrap
+precision moved the slope from −0.0134 to −0.0142 and changed no conclusion,
+which is its own small result: the season estimates are precise enough that it
+did not matter.
 
 ## Reproducing
 
@@ -322,7 +337,10 @@ of value per unit of work:
 
 - **A Streamlit view** over `attribution.parquet` and the zone grids, so the
   leaderboard and the count contours can be filtered rather than read.
-- **Uncertainty on the season spreads themselves.** The trend slopes above treat
-  each season's spread as one equally weighted observation. A nested bootstrap
-  would put a proper interval on each point, and would firm up how flat the
-  umpire series really is.
+- **An unbiased interval on the season spreads.** The nested bootstrap's draws
+  sit about 0.11 above the statistic — an artefact of resampling twice, since an
+  inner bootstrap drawn from already-resampled games understates that
+  replicate's noise. Only the width is used, so the intervals are symmetric by
+  construction. A bias-corrected accelerated bootstrap, or an analytic
+  cluster-robust standard error in place of the inner loop, would give a
+  properly asymmetric one.
