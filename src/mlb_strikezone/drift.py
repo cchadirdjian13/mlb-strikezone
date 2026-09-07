@@ -9,17 +9,21 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
+from sklearn.linear_model import Ridge
 
 from mlb_strikezone.attribution import (
     PREDICTIONS,
     ROLES,
     UMPIRES,
     bootstrap_standard_errors,
+    build_design,
     fit_joint,
+    games_as_row_blocks,
 )
 
 PROCESSED = Path("data/processed")
 SEASON_EFFECTS = PROCESSED / "season_effects.parquet"
+SEASON_SPREADS = PROCESSED / "season_spreads.parquet"
 FIGURES = Path("figures")
 
 # Far lighter than the pooled fit's 2000. Ridge shrinks an effect by roughly
@@ -30,6 +34,20 @@ FIGURES = Path("figures")
 SEASON_ALPHA = 100
 SEASON_MIN_PITCHES = 1000
 BOOTSTRAP_REPLICATES = 100
+
+# The interval on a season's spread is nested: the outer loop resamples games,
+# and each outer replicate needs its own standard errors before its spread can
+# be corrected. Inner stays small because it only has to pin an average of
+# squared errors over ~90 people, which is far easier than pinning any one.
+#
+# Only the width of that distribution is used. Its centre sits roughly 15% above
+# the statistic, because an inner bootstrap drawn from an already-resampled set
+# of games understates that replicate's noise, so every replicate under-corrects
+# and lands high. That is an artefact of nesting rather than anything about the
+# season, so percentile bounds would be misleading and the interval is built as
+# the point estimate plus and minus two bootstrap standard errors.
+OUTER_REPLICATES = 100
+INNER_REPLICATES = 15
 
 SHORT_SEASON = 2020
 
@@ -73,6 +91,70 @@ def season_effects(df, season):
     )
 
 
+def _resample(blocks, picked):
+    return np.concatenate([blocks[game] for game in picked])
+
+
+def spread_bootstrap(df, season, outer=OUTER_REPLICATES, inner=INNER_REPLICATES, seed=0):
+    """Bootstrap distribution of each role's corrected spread for one season.
+
+    Nested rather than single-level, because the spread is not a mean. It is a
+    variance with the estimation noise subtracted, and that subtraction needs the
+    standard errors of the effects, which are themselves a bootstrap. Every outer
+    replicate therefore re-estimates them from its own resampled games. Reusing
+    the full sample's standard errors would apply one estimator to the point
+    estimate and a different one to the replicates, and the interval would
+    describe neither."""
+    slice_ = df[df["season"] == season]
+    design, encoder = build_design(slice_)
+    residual = slice_["residual"].to_numpy()
+    blocks = games_as_row_blocks(slice_)
+    columns = {
+        "umpire": slice(0, len(encoder.categories_[0])),
+        "catcher": slice(len(encoder.categories_[0]), None),
+    }
+    rng = np.random.default_rng(seed)
+
+    draws = {role: np.empty(outer) for role in columns}
+    for replicate in range(outer):
+        picked = rng.integers(0, len(blocks), len(blocks))
+        rows = _resample(blocks, picked)
+        effect = Ridge(alpha=SEASON_ALPHA).fit(design[rows], residual[rows]).coef_
+        # One-hot columns sum to each person's pitch count, so the qualification
+        # floor can be reapplied per replicate without touching the frame.
+        counts = np.asarray(design[rows].sum(axis=0)).ravel()
+
+        inner_draws = np.empty((inner, design.shape[1]))
+        for step in range(inner):
+            repicked = picked[rng.integers(0, len(picked), len(picked))]
+            inner_rows = _resample(blocks, repicked)
+            inner_draws[step] = (
+                Ridge(alpha=SEASON_ALPHA).fit(design[inner_rows], residual[inner_rows]).coef_
+            )
+        se = inner_draws.std(axis=0, ddof=1)
+
+        for role, span in columns.items():
+            keep = counts[span] >= SEASON_MIN_PITCHES
+            draws[role][replicate] = corrected_spread(effect[span][keep], se[span][keep])
+    return draws
+
+
+def summarise_bootstrap(draws, season):
+    """Width of the bootstrap distribution, and where it sits relative to the
+    statistic so the shift stays visible rather than being quietly absorbed."""
+    rows = []
+    for role, values in draws.items():
+        rows.append(
+            {
+                "season": season,
+                "role": role,
+                "spread_se": values.std(ddof=1) * 100,
+                "draw_median": np.median(values) * 100,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
 def spread_by_season(effects):
     rows = []
     for (season, role), group in effects.groupby(["season", "role"]):
@@ -91,22 +173,37 @@ def spread_by_season(effects):
 
 
 def trend(subset):
-    """Least-squares slope of spread against season, with its standard error.
+    """Slope of spread against season, with its standard error.
 
-    Each season is treated as one equally weighted observation, which is rough —
-    the spreads carry their own errors — but it is enough to say whether a
-    decline is a trend or two unusual end points with noise in between."""
+    Seasons are weighted by their bootstrap precision when it is available, so a
+    short season with a wide interval does not pull the line as hard as a full
+    one. The standard error is scaled by the observed weighted scatter rather
+    than taken from the weights alone, which keeps it honest if the spread
+    really does move between seasons by more than estimation noise."""
     x, y = subset["season"].to_numpy(float), subset["spread"].to_numpy()
-    slope, intercept = np.polyfit(x, y, 1)
+    weights = (
+        1 / subset["spread_se"].to_numpy() ** 2
+        if "spread_se" in subset and subset["spread_se"].notna().all()
+        else np.ones(len(x))
+    )
+
+    centre = np.average(x, weights=weights)
+    spread_x = (weights * (x - centre) ** 2).sum()
+    slope = (weights * (x - centre) * (y - np.average(y, weights=weights))).sum() / spread_x
+    intercept = np.average(y, weights=weights) - slope * centre
+
     residuals = y - (slope * x + intercept)
-    scatter = np.sqrt((residuals**2).sum() / (len(x) - 2))
-    return slope, scatter / np.sqrt(((x - x.mean()) ** 2).sum())
+    scatter = (weights * residuals**2).sum() / (len(x) - 2)
+    return slope, np.sqrt(scatter / spread_x)
 
 
 def figure_spread(spreads, path):
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
     for role, color in [("umpire", "#c1442f"), ("catcher", "#3b6ea5")]:
         subset = spreads[spreads["role"] == role]
+        if "lo" in subset:
+            ax.fill_between(subset["season"], subset["lo"], subset["hi"],
+                            color=color, alpha=0.15, lw=0)
         ax.plot(subset["season"], subset["spread"], marker="o", color=color, label=role)
         short = subset[subset["season"] == SHORT_SEASON]
         ax.scatter(short["season"], short["spread"], s=90, facecolor="white",
@@ -115,7 +212,7 @@ def figure_spread(spreads, path):
     ax.set_ylim(bottom=0)
     ax.set_xlabel("season")
     ax.set_ylabel("spread between people, per 100 called pitches")
-    ax.set_title("Noise-corrected spread by season (hollow = 2020, 60 games)")
+    ax.set_title("Noise-corrected spread by season, ±2 SE (hollow = 2020, 60 games)")
     ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -127,19 +224,26 @@ def fit_and_save():
     seasons = sorted(df["season"].unique())
     print(f"{len(df):,} called pitches over {len(seasons)} seasons")
 
-    effects = []
+    effects, intervals = [], []
     for season in seasons:
-        print(f"fitting {season} ({BOOTSTRAP_REPLICATES} bootstrap replicates)...")
+        print(f"fitting {season}: {BOOTSTRAP_REPLICATES} replicates for the effects, "
+              f"then {OUTER_REPLICATES}x{INNER_REPLICATES} nested for the spread...")
         effects.append(season_effects(df, season))
+        intervals.append(summarise_bootstrap(spread_bootstrap(df, season), season))
 
     PROCESSED.mkdir(parents=True, exist_ok=True)
     pd.concat(effects, ignore_index=True).to_parquet(SEASON_EFFECTS, index=False)
-    print(f"wrote {SEASON_EFFECTS}\n")
+    pd.concat(intervals, ignore_index=True).to_parquet(SEASON_SPREADS, index=False)
+    print(f"wrote {SEASON_EFFECTS} and {SEASON_SPREADS}\n")
 
 
 def report():
     effects = pd.read_parquet(SEASON_EFFECTS)
-    spreads = spread_by_season(effects)
+    spreads = spread_by_season(effects).merge(
+        pd.read_parquet(SEASON_SPREADS), on=["season", "role"], how="left"
+    )
+    spreads["lo"] = spreads["spread"] - 2 * spreads["spread_se"]
+    spreads["hi"] = spreads["spread"] + 2 * spreads["spread_se"]
     for role in ROLES.values():
         print(f"\n{role}s, spread by season (per 100 called pitches, "
               f"n >= {SEASON_MIN_PITCHES:,})")
@@ -148,6 +252,11 @@ def report():
             .drop(columns=["role"])
             .to_string(index=False, float_format=lambda v: f"{v:.3f}")
         )
+
+    lift = (spreads["draw_median"] - spreads["spread"]).mean()
+    print(f"\nnested bootstrap draws sit {lift:+.3f} above the statistic on average, an "
+          "artefact of\nresampling twice; intervals use the width of that distribution, "
+          "not its position")
 
     print("\ntrend in spread per season, 2020 excluded as a 60-game season")
     full = spreads[spreads["season"] != SHORT_SEASON]
@@ -164,7 +273,7 @@ def report():
 
 
 def main(refit):
-    if refit or not SEASON_EFFECTS.exists():
+    if refit or not (SEASON_EFFECTS.exists() and SEASON_SPREADS.exists()):
         fit_and_save()
     else:
         print(f"reusing {SEASON_EFFECTS}; pass --refit to fit again\n")
@@ -205,6 +314,19 @@ def _self_check():
     real_slope, real_error = trend(sloped)
     assert abs(flat_slope) < 2 * flat_error, (flat_slope, flat_error)
     assert abs(real_slope) > 2 * real_error, (real_slope, real_error)
+
+    # Weighting must actually bite: one wildly imprecise season pulls the
+    # unweighted line and should barely move the weighted one.
+    outlier = sloped.copy()
+    outlier.loc[0, "spread"] = 3.0
+    tight = np.full(10, 0.02)
+    tight[0] = 5.0
+    assert abs(trend(outlier)[0] - real_slope) > 0.05, "unweighted fit should be dragged"
+    weighted = trend(outlier.assign(spread_se=tight))[0]
+    assert abs(weighted - real_slope) < 0.02, (weighted, real_slope)
+
+    # An all-NaN error column falls back to equal weights rather than failing.
+    assert trend(sloped.assign(spread_se=np.nan))[0] == real_slope
     print("ok")
 
 
