@@ -1,4 +1,6 @@
-# mlb-strikezone
+# MLB Strike Zone Analysis
+
+**[Live app →](https://your-app.streamlit.app)** · [Key findings](#findings) · [Methodology](#methodology)
 
 How the called strike zone actually moves — measured from 3.7 million taken
 pitches, 2015–2025.
