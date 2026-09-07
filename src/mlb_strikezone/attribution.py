@@ -49,7 +49,7 @@ def load():
     return df
 
 
-def fit_joint(df):
+def fit_joint(df, alpha=ALPHA):
     """One ridge fit with umpire and catcher effects side by side.
 
     Fitting them separately would double-count: a catcher's framing sits in the
@@ -63,7 +63,7 @@ def fit_joint(df):
     and it fits 3.7M rows in seconds. The standard errors below are bootstrapped
     rather than read off the fit, so they do not depend on that efficiency."""
     design, encoder = build_design(df)
-    model = Ridge(alpha=ALPHA).fit(design, df["residual"])
+    model = Ridge(alpha=alpha).fit(design, df["residual"])
     return label_coefficients(encoder, model.coef_, "effect")
 
 
@@ -115,7 +115,7 @@ def games_as_row_blocks(df):
     return np.split(order, starts[1:])
 
 
-def bootstrap_standard_errors(df, replicates=BOOTSTRAP_REPLICATES, seed=0):
+def bootstrap_standard_errors(df, replicates=BOOTSTRAP_REPLICATES, seed=0, alpha=ALPHA):
     """Standard error of each effect, from refitting on games drawn with
     replacement. The design matrix is built once and indexed per replicate;
     rebuilding it each time is what makes the naive version of this too slow."""
@@ -128,7 +128,7 @@ def bootstrap_standard_errors(df, replicates=BOOTSTRAP_REPLICATES, seed=0):
     for replicate in range(replicates):
         picked = rng.integers(0, len(blocks), len(blocks))
         rows = np.concatenate([blocks[game] for game in picked])
-        draws[replicate] = Ridge(alpha=ALPHA).fit(design[rows], residual[rows]).coef_
+        draws[replicate] = Ridge(alpha=alpha).fit(design[rows], residual[rows]).coef_
     return label_coefficients(encoder, draws.std(axis=0, ddof=1), "se")
 
 
