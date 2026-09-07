@@ -28,6 +28,9 @@ FIGURES = Path("figures")
 ALPHA = 2000
 MIN_PITCHES = 2000
 
+# Enough to pin a standard error; percentile intervals would want far more.
+BOOTSTRAP_REPLICATES = 200
+
 ROLES = {"ump_id": "umpire", "fielder_2": "catcher"}
 
 
@@ -57,17 +60,29 @@ def fit_joint(df):
     ponytail: linear on residuals, not logistic with an offset. The residual is
     heteroscedastic so this is not the efficient estimator, but it is the
     interpretable one — coefficients are already in called strikes per pitch —
-    and it fits 3.7M rows in seconds. Revisit if the standard errors matter."""
-    encoder = OneHotEncoder(dtype=np.float32)
-    design = encoder.fit_transform(df[list(ROLES)])
+    and it fits 3.7M rows in seconds. The standard errors below are bootstrapped
+    rather than read off the fit, so they do not depend on that efficiency."""
+    design, encoder = build_design(df)
     model = Ridge(alpha=ALPHA).fit(design, df["residual"])
+    return label_coefficients(encoder, model.coef_, "effect")
 
-    effects = []
-    for (column, role), categories, coefficients in zip(
-        ROLES.items(), encoder.categories_, np.split(model.coef_, [len(encoder.categories_[0])])
-    ):
-        effects.append(pd.DataFrame({"role": role, "id": categories, "effect": coefficients}))
-    return pd.concat(effects, ignore_index=True)
+
+def build_design(df):
+    """Sparse one-hot over both roles at once. Two non-zeros per row."""
+    encoder = OneHotEncoder(dtype=np.float32)
+    return encoder.fit_transform(df[list(ROLES)]), encoder
+
+
+def label_coefficients(encoder, coefficients, column):
+    """Split a flat coefficient vector back into per-role, per-person rows."""
+    split = np.split(coefficients, [len(encoder.categories_[0])])
+    return pd.concat(
+        [
+            pd.DataFrame({"role": role, "id": categories, column: values})
+            for role, categories, values in zip(ROLES.values(), encoder.categories_, split)
+        ],
+        ignore_index=True,
+    )
 
 
 def fit_marginal(df):
@@ -85,6 +100,36 @@ def fit_marginal(df):
             pd.DataFrame({"role": role, "id": encoder.categories_[0], "marginal": model.coef_})
         )
     return pd.concat(effects, ignore_index=True)
+
+
+def games_as_row_blocks(df):
+    """Row positions grouped by game.
+
+    Resampling has to happen on whole games, not on pitches: within a game the
+    umpire is fixed and the calls share a park, a day and a strike zone, so
+    resampling pitches would treat thousands of correlated calls as independent
+    draws and report standard errors several times too small."""
+    games = df["game_pk"].to_numpy()
+    order = np.argsort(games, kind="stable")
+    starts = np.unique(games[order], return_index=True)[1]
+    return np.split(order, starts[1:])
+
+
+def bootstrap_standard_errors(df, replicates=BOOTSTRAP_REPLICATES, seed=0):
+    """Standard error of each effect, from refitting on games drawn with
+    replacement. The design matrix is built once and indexed per replicate;
+    rebuilding it each time is what makes the naive version of this too slow."""
+    design, encoder = build_design(df)
+    residual = df["residual"].to_numpy()
+    blocks = games_as_row_blocks(df)
+    rng = np.random.default_rng(seed)
+
+    draws = np.empty((replicates, design.shape[1]))
+    for replicate in range(replicates):
+        picked = rng.integers(0, len(blocks), len(blocks))
+        rows = np.concatenate([blocks[game] for game in picked])
+        draws[replicate] = Ridge(alpha=ALPHA).fit(design[rows], residual[rows]).coef_
+    return label_coefficients(encoder, draws.std(axis=0, ddof=1), "se")
 
 
 def naive_effects(df):
@@ -123,11 +168,43 @@ def leaderboard(effects, role, min_pitches=MIN_PITCHES):
     # Per 100 called pitches is the readable unit; the total is the same number
     # expressed as how many calls it actually moved over the whole sample.
     board["per_100"] = board["effect"] * 100
+    board["se_per_100"] = board["se"] * 100
     board["extra_strikes"] = board["effect"] * board["pitches"]
-    board["alone_per_100"] = board["marginal"] * 100
+    # Two standard errors from zero. Not a significance test across 334 people,
+    # where some would clear it by chance; a floor for reading a single row.
+    board["clear"] = np.where(board["effect"].abs() > 2 * board["se"], "yes", "")
     return board.sort_values("per_100", ascending=False)[
-        ["name", "pitches", "per_100", "extra_strikes", "alone_per_100"]
+        ["name", "pitches", "per_100", "se_per_100", "clear", "extra_strikes"]
     ]
+
+
+def figure_caterpillar(effects, path):
+    """Every qualifying person, ranked, with two-standard-error bars.
+
+    The ranking alone invites reading a table top to bottom as if each row beat
+    the one below it. Drawn this way the overlap is the point: the ends separate
+    from zero and from each other, the middle does neither."""
+    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharey=True)
+    for ax, (role, color) in zip(axes, [("umpire", "#c1442f"), ("catcher", "#3b6ea5")]):
+        subset = (
+            effects[(effects["role"] == role) & (effects["pitches"] >= MIN_PITCHES)]
+            .sort_values("effect")
+            .reset_index(drop=True)
+        )
+        clear = subset["effect"].abs() > 2 * subset["se"]
+        ax.errorbar(
+            subset.index, subset["effect"] * 100, yerr=subset["se"] * 200,
+            fmt="none", ecolor=color, alpha=0.35, lw=1,
+        )
+        ax.scatter(subset.index, subset["effect"] * 100, s=9, color=color,
+                   alpha=np.where(clear, 1.0, 0.25))
+        ax.axhline(0, color="black", lw=1)
+        ax.set_xlabel(f"{role}s, ranked ({clear.sum()} of {len(subset)} clear zero)")
+    axes[0].set_ylabel("called strikes per 100, ±2 SE")
+    fig.suptitle("Where the leaderboard is real and where it is noise")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
 
 
 def figure_joint_vs_marginal(effects, path):
@@ -165,10 +242,13 @@ def main():
           f"{df['fielder_2'].nunique()} catchers")
     print(f"mean residual overall: {df['residual'].mean():+.5f}\n")
 
+    print(f"bootstrapping {BOOTSTRAP_REPLICATES} replicates over "
+          f"{df['game_pk'].nunique():,} games...")
     effects = (
         fit_joint(df)
         .merge(fit_marginal(df), on=["role", "id"])
         .merge(naive_effects(df), on=["role", "id"])
+        .merge(bootstrap_standard_errors(df), on=["role", "id"])
     )
     effects = add_names(effects, df)
 
@@ -180,8 +260,15 @@ def main():
         print(f"\n{role}s, least strike-friendly")
         print(board.tail(10).to_string(index=False, float_format=lambda v: f"{v:.3f}"))
 
-    print("\nwhat each step does, per 100 called pitches, for qualifying people")
+    print("\nhow much of the leaderboard is distinguishable from zero")
     qualified = effects[effects["pitches"] >= MIN_PITCHES]
+    for role in ROLES.values():
+        subset = qualified[qualified["role"] == role]
+        clear = (subset["effect"].abs() > 2 * subset["se"]).sum()
+        print(f"  {role}s: {clear} of {len(subset)} beyond two standard errors, "
+              f"median SE {subset['se'].median() * 100:.3f} per 100")
+
+    print("\nwhat each step does, per 100 called pitches, for qualifying people")
     for role in ROLES.values():
         subset = qualified[qualified["role"] == role]
         shrinkage = (subset["naive"] - subset["marginal"]).abs().mean() * 100
@@ -191,6 +278,7 @@ def main():
               f"moves {partner:.3f} ({moved:.0%} shrink further)")
 
     FIGURES.mkdir(exist_ok=True)
+    figure_caterpillar(effects, FIGURES / "attribution_caterpillar.png")
     figure_joint_vs_marginal(effects, FIGURES / "joint_vs_marginal_attribution.png")
     effects.to_parquet(ATTRIBUTION, index=False)
     print(f"\nwrote {ATTRIBUTION} and {FIGURES / 'joint_vs_marginal_attribution.png'}")
@@ -237,6 +325,24 @@ def _self_check():
     # keeps the contamination the joint fit removes. Without this the figure
     # comparing the two would be measuring regularisation, not confounding.
     assert marginal[("umpire", 0)] > joint[("umpire", 0)] + 0.02, marginal[("umpire", 0)]
+
+    # Standard errors resample whole games, so the umpire is fixed within one,
+    # as he is in reality. Umpire 3 works a thirtieth of the slate and must come
+    # back with a visibly looser estimate than the umpires working a third of it.
+    games = np.arange(n) // 40
+    per_game = rng.choice([0, 1, 2], games[-1] + 1)
+    per_game[rng.random(len(per_game)) < 0.03] = 3
+    sample = pd.DataFrame(
+        {
+            "game_pk": games,
+            "ump_id": per_game[games],
+            "fielder_2": rng.choice(catchers, n),
+            "residual": rng.normal(0, 0.3, n),
+        }
+    )
+    se = bootstrap_standard_errors(sample, replicates=25).set_index(["role", "id"])["se"]
+    assert (se > 0).all(), se
+    assert se[("umpire", 3)] > 2 * se[("umpire", 0)], se
     print("ok")
 
 
