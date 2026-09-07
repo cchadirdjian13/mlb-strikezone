@@ -112,6 +112,72 @@ against predicted. On a conventional diagonal calibration plot both models look
 perfect — the first version of this chart used equal-count bins and put six of
 ten points below 0.03, which hid the bow entirely.
 
+## Who moves the zone
+
+With a calibrated probability per pitch, the residual — actual call minus
+predicted probability — is what location cannot explain. Umpires and catchers
+are fitted to that residual **together**, in one ridge regression with both sets
+of effects side by side. Fitting them separately would double-count: a
+catcher's framing sits in the residual of every umpire he works with, and every
+umpire's tendency sits in the residual of every catcher. The ridge penalty is
+set at 2,000, which in this design reads in pitches — someone with 2,000 called
+pitches keeps about half their raw residual, which is also the sample floor
+below which a number isn't worth believing.
+
+Effects are in called strikes per 100 taken pitches, net of the other party.
+
+| umpire | pitches | per 100 | extra strikes |
+| --- | --- | --- | --- |
+| Doug Eddings | 45,238 | **+3.06** | +1,385 |
+| Bill Miller | 47,280 | +2.42 | +1,144 |
+| Lance Barrett | 45,452 | +1.88 | +855 |
+| … | | | |
+| Mark Wegner | 41,910 | −1.64 | −689 |
+| Alfonso Márquez | 46,604 | −1.60 | −747 |
+| Tom Woodring | 13,354 | **−1.78** | −237 |
+
+| catcher | pitches | per 100 | extra strikes |
+| --- | --- | --- | --- |
+| Tyler Flowers | 31,597 | **+2.59** | +820 |
+| Yasmani Grandal | 62,725 | +2.08 | +1,307 |
+| Austin Hedges | 49,954 | +1.98 | +987 |
+| … | | | |
+| Isiah Kiner-Falefa | 5,065 | −2.04 | −103 |
+| Edgar Quero | 4,807 | −2.14 | −103 |
+| Ramón Cabrera | 3,670 | **−2.46** | −90 |
+
+**Catchers move the zone about as much as umpires do.** The umpire spread across
+129 qualifiers is 4.8 calls per 100; the catcher spread across 205 is 5.1. Who
+is catching is worth roughly as much as who is calling.
+
+The catcher list is also the closest thing here to external validation. Nothing
+in this pipeline knows what pitch framing is — the model sees only location,
+count, handedness, pitch type and velocity, and the residual is attributed
+blind. It independently returns Flowers, Grandal, Hedges, Mathis, Barnes,
+Trevino and Posey at the top, which is essentially the framing leaderboard the
+public metrics have been publishing for a decade.
+
+### The joint fit changed less than expected
+
+Worth stating plainly, because it argues against the design decision that
+produced it. Comparing the joint estimates against fitting each role *alone
+with identical shrinkage* — which isolates the partner control from the
+regularisation — the difference is about **0.05 calls per 100**, against effects
+that range over ±2.5.
+
+![Joint against solo attribution](figures/joint_vs_marginal_attribution.png)
+
+Both roles land on the diagonal. The confounding is real but small in this
+sample, because over eleven seasons umpires work with many catchers and
+catchers with many umpires, so partners largely average out. Ridge shrinkage
+moves the numbers three to seven times further than the joint fit does (0.16
+per 100 for umpires, 0.36 for catchers).
+
+That is a reason to trust the leaderboard, not a reason to skip the joint fit:
+the correction being small is a finding, and it isn't one you can assert
+without doing the fit. It would not stay small for a single season, or for a
+catcher who caught for one crew.
+
 ## Reproducing
 
 Python 3.12 via [uv](https://docs.astral.sh/uv/). Data is pulled from Baseball
@@ -124,6 +190,7 @@ uv run python src/mlb_strikezone/features.py
 uv run python src/mlb_strikezone/umpires.py
 uv run python src/mlb_strikezone/analysis.py
 uv run python src/mlb_strikezone/model.py
+uv run python src/mlb_strikezone/attribution.py
 ```
 
 The ingest step is the slow one — it pulls a month at a time and caches one
@@ -138,6 +205,10 @@ tables above and writes the four zone figures.
 rerun reuses the saved predictions and only re-derives the scores and the
 calibration chart. Pass `--refit` to actually fit again.
 
+`attribution.py` reads those predictions back, fits the joint leaderboard and
+writes `data/processed/attribution.parquet`. It takes seconds — the ridge is
+sparse, two non-zeros per row.
+
 Each module self-tests without touching the data:
 
 ```bash
@@ -146,6 +217,7 @@ uv run python src/mlb_strikezone/features.py --check
 uv run python src/mlb_strikezone/umpires.py --check
 uv run python src/mlb_strikezone/analysis.py --check
 uv run python src/mlb_strikezone/model.py --check
+uv run python src/mlb_strikezone/attribution.py --check
 ```
 
 ## Limitations
@@ -155,21 +227,33 @@ uv run python src/mlb_strikezone/model.py --check
   catchers set up all shift with the count, and none of that is controlled for
   here.
 - 2020 is a 60-game season and is roughly a third the sample of the others.
-- No umpire attribution yet. The plate umpire for all 25,193 games is joined,
-  the model is fitted, and the out-of-fold residuals exist — but nobody is
-  ranked here.
 - The model knows where the pitch was and what it was, not who was behind the
   plate or who caught it. That is deliberate: those are the effects to be
   measured, so they must stay out of the prediction.
+- Attribution is a linear fit on residuals, not a logistic one with an offset.
+  The residual is heteroscedastic, so the estimates are interpretable but not
+  efficient, and no standard errors are reported. Treat the ordering as
+  indicative and the gap between adjacent names as noise.
+- A catcher's effect absorbs anything correlated with him that the model does
+  not see — his pitching staff's command, his team's park, the pitch mix he
+  calls. It is a catcher-shaped residual, not a measurement of framing skill in
+  isolation.
+- Umpire and catcher are separable only because crews and catchers cross over
+  across eleven seasons. Over one season, or for a catcher who caught for a
+  single crew, they would not be.
 
 ## Next
 
-Attribute the residual (actual call − predicted strike probability) to
-individual umpires and catchers, **fitting both jointly**. A given catcher's
-framing shows up in the residual of every umpire he works with, and vice versa;
-ranking them from separate fits would count the same edge calls twice and
-credit them to both. One fit with both sets of effects competing for the same
-variance is the only way the numbers mean what they claim to.
+The pipeline is complete end to end: ingest, called-pitch table, umpires,
+descriptive zone, model, attribution. What would sharpen it, roughly in order
+of value per unit of work:
 
-129 of 138 umpires clear the 2,000 called-pitch minimum, and the contested band
-alone holds roughly 890,000 pitches, so the sample is there.
+- **Standard errors on the leaderboard.** The ordering is currently indicative
+  and the gaps between adjacent names are unquantified. Bootstrapping over
+  games would fix that, and would say which of the 129 umpires are actually
+  distinguishable from the middle.
+- **Effects by season rather than pooled.** An umpire's zone in 2015 and in
+  2025 are averaged together here, which hides both drift and the effect of the
+  crossover that makes the joint fit identifiable.
+- **A Streamlit view** over `attribution.parquet` and the zone grids, so the
+  leaderboard and the count contours can be filtered rather than read.
