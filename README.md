@@ -1,6 +1,6 @@
 # MLB Strike Zone Analysis
 
-**[Live app →](https://your-app.streamlit.app)** · [Key findings](#findings) · [Methodology](#methodology)
+**[Live app →](https://your-app.streamlit.app)** · [Finding](#finding) · [How the zone is measured](#how-the-zone-is-measured) · [Modelling the call](#modelling-the-call) · [Reproducing](#reproducing)
 
 How the called strike zone actually moves — measured from 3.7 million taken
 pitches, 2015–2025.
@@ -10,7 +10,7 @@ recorded to the inch by Statcast. That makes the strike zone one of the few
 places in sport where you can measure the gap between a written rule and how it
 is enforced. This repo measures that gap.
 
-## Finding
+## Findings
 
 **The zone an umpire calls on 3-0 is 36% larger than the one they call on 0-2**
 — 3.78 sq ft against 2.78 sq ft.
