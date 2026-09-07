@@ -207,6 +207,45 @@ the correction being small is a finding, and it isn't one you can assert
 without doing the fit. It would not stay small for a single season, or for a
 catcher who caught for one crew.
 
+### Catchers converged. Umpires did not.
+
+The leaderboard above pools eleven seasons into one number per person, which
+hides whether the pool is changing. Refitting one season at a time answers that,
+with two adjustments the result depends on entirely:
+
+- **A far lighter ridge penalty, 100 rather than 2,000.** Shrinkage is roughly
+  `n / (n + alpha)`, and a season holds an eighth of an umpire's pooled
+  workload — 2020 a twenty-fifth. The pooled penalty would shrink short seasons
+  hardest and manufacture a convergence trend out of nothing but sample size.
+  At 100 the shrinkage stays under 5% in every season.
+- **The spread is corrected for estimation noise.** The observed standard
+  deviation of a season's estimates carries their own standard errors on top of
+  the real variation, and carries more of them when there is less data. The
+  reported spread subtracts the mean squared error. Without this 2020 is the
+  *most* variable umpire season in the sample (raw 1.29, corrected 1.11) purely
+  because it is the shortest.
+
+![Spread between people by season](figures/spread_by_season.png)
+
+| | 2015 | 2025 | slope per season |
+| --- | --- | --- | --- |
+| catchers | 1.27 | 0.80 | **−0.052 ± 0.010** |
+| umpires | 1.16 | 0.85 | −0.013 ± 0.008 |
+
+**The catcher spread has collapsed by about a third, and the trend is five
+standard errors from flat.** In 2017 the gap between a good and a bad framer was
+half again what it is now. That is consistent with framing becoming a known and
+priced skill over this period — teams that can measure it stop employing
+catchers who are bad at it — though this data can show only the compression, not
+the cause.
+
+**The umpire spread has not meaningfully moved.** The end points tempt a
+different story: 1.16 down to 0.85 reads as a 27% decline. But the slope is
+−0.013 ± 0.008, under two standard errors, and the middle of the series wobbles
+between 0.94 and 1.06 with no direction — 2023 and 2024 are both *higher* than
+2017. Two unusual end seasons are not a trend. Whatever has changed about the
+strike zone since 2015, umpires are not becoming more alike.
+
 ## Reproducing
 
 Python 3.12 via [uv](https://docs.astral.sh/uv/). Data is pulled from Baseball
@@ -220,6 +259,7 @@ uv run python src/mlb_strikezone/umpires.py
 uv run python src/mlb_strikezone/analysis.py
 uv run python src/mlb_strikezone/model.py
 uv run python src/mlb_strikezone/attribution.py
+uv run python src/mlb_strikezone/drift.py
 ```
 
 The ingest step is the slow one — it pulls a month at a time and caches one
@@ -248,6 +288,7 @@ uv run python src/mlb_strikezone/umpires.py --check
 uv run python src/mlb_strikezone/analysis.py --check
 uv run python src/mlb_strikezone/model.py --check
 uv run python src/mlb_strikezone/attribution.py --check
+uv run python src/mlb_strikezone/drift.py --check
 ```
 
 ## Limitations
@@ -279,8 +320,9 @@ The pipeline is complete end to end: ingest, called-pitch table, umpires,
 descriptive zone, model, attribution. What would sharpen it, roughly in order
 of value per unit of work:
 
-- **Effects by season rather than pooled.** An umpire's zone in 2015 and in
-  2025 are averaged together here, which hides both drift and the effect of the
-  crossover that makes the joint fit identifiable.
 - **A Streamlit view** over `attribution.parquet` and the zone grids, so the
   leaderboard and the count contours can be filtered rather than read.
+- **Uncertainty on the season spreads themselves.** The trend slopes above treat
+  each season's spread as one equally weighted observation. A nested bootstrap
+  would put a proper interval on each point, and would firm up how flat the
+  umpire series really is.
