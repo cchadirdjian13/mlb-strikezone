@@ -222,22 +222,36 @@ with two adjustments the result depends on entirely:
   deviation of a season's estimates carries their own standard errors on top of
   the real variation, and carries more of them when there is less data. The
   reported spread subtracts the mean squared error. Without this 2020 is the
-  *most* variable umpire season in the sample (raw 1.29, corrected 1.11) purely
+  *most* variable umpire season in the sample (raw 1.29, corrected 1.09) purely
   because it is the shortest.
 
 ![Spread between people by season](figures/spread_by_season.png)
 
-Each season's spread carries a nested bootstrap interval, drawn as a band above:
-the outer loop resamples games, and because the spread is a variance with the
-estimation noise subtracted, every outer replicate has to re-estimate that noise
-from its own resampled games. Seasons are then weighted by their precision when
-the trend is fitted, so 2020's wide band does not pull the line like a full
-season's narrow one.
+Each season's spread carries a bootstrap interval over resampled games, drawn as
+a band above, and seasons are weighted by their precision when the trend is
+fitted, so 2020's wide band does not pull the line like a full season's narrow
+one.
+
+Bootstrapping this particular statistic has a trap in it worth naming, because
+the first two attempts fell in. The observed effects already carry one helping
+of estimation noise; a replicate resamples them and carries a second. Subtract
+one helping from a replicate, as the definition of the statistic says to, and
+the bootstrap converges on the **uncorrected** standard deviation rather than on
+the statistic — about 0.11 too high, far enough that every point estimate landed
+outside its own percentile bounds. Replicates take the correction twice. After
+that the draws sit 0.006 from the statistic and every point estimate is inside
+its interval, so the bounds mean what they say and are free to be asymmetric.
+
+The standard errors behind that correction are closed-form and clustered on the
+game rather than bootstrapped, which is both faster and applies one estimator at
+both levels. They run about 1.07x the bootstrap errors — the gap is the ridge
+shrinkage the bootstrap sees and a plain mean does not — which pushes the
+reported spread down roughly 1%.
 
 | | 2015 | 2025 | slope per season |
 | --- | --- | --- | --- |
-| catchers | 1.27 | 0.80 | **−0.052 ± 0.010** |
-| umpires | 1.16 | 0.85 | −0.014 ± 0.008 |
+| catchers | 1.26 | 0.79 | **−0.053 ± 0.010** |
+| umpires | 1.14 | 0.84 | −0.012 ± 0.008 |
 
 **The catcher spread has collapsed by about a third, and the trend is five
 standard errors from flat.** In 2017 the gap between a good and a bad framer was
@@ -247,19 +261,22 @@ catchers who are bad at it — though this data can show only the compression, n
 the cause.
 
 **The umpire spread is not established as moving.** The end points tempt a
-different story: 1.16 down to 0.85 reads as a 27% decline. But the slope is
-−0.014 ± 0.008, and the middle of the series wobbles between 0.94 and 1.06 with
+different story: 1.14 down to 0.84 reads as a 27% decline. But the slope is
+−0.012 ± 0.008, and the middle of the series wobbles between 0.92 and 1.06 with
 no direction — 2023 and 2024 are both *higher* than 2017, and their bands
 overlap almost everything.
 
-That is 1.9 standard errors, which is short of the conventional bar but close
+That is 1.6 standard errors, which is short of the conventional bar but close
 enough that "umpires are not converging" would be overclaiming in the other
 direction. The honest reading is that eleven seasons cannot separate a slow
 umpire convergence from none at all, while the same eleven seasons settle the
-catcher question five times over. Weighting the seasons by their bootstrap
-precision moved the slope from −0.0134 to −0.0142 and changed no conclusion,
-which is its own small result: the season estimates are precise enough that it
-did not matter.
+catcher question five times over.
+
+That conclusion has now survived three different ways of estimating the
+uncertainty — equal weights, precision weights from a nested bootstrap, and
+precision weights from the corrected one — which moved the umpire slope between
+−0.012 and −0.014 and never moved it across the bar. The season estimates are
+precise enough that the choice did not matter.
 
 ## Poking at it yourself
 
@@ -351,10 +368,8 @@ The pipeline is complete end to end: ingest, called-pitch table, umpires,
 descriptive zone, model, attribution. What would sharpen it, roughly in order
 of value per unit of work:
 
-- **An unbiased interval on the season spreads.** The nested bootstrap's draws
-  sit about 0.11 above the statistic — an artefact of resampling twice, since an
-  inner bootstrap drawn from already-resampled games understates that
-  replicate's noise. Only the width is used, so the intervals are symmetric by
-  construction. A bias-corrected accelerated bootstrap, or an analytic
-  cluster-robust standard error in place of the inner loop, would give a
-  properly asymmetric one.
+- **Catcher effects absorb their pitching staff.** A catcher's number carries
+  anything correlated with him that the model cannot see — his staff's command,
+  his park, the pitch mix he calls. Adding pitcher effects to the joint fit
+  would separate framing from the men being framed for, at the cost of a third
+  set of effects competing for the same variance.

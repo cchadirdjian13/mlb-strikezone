@@ -132,6 +132,23 @@ def bootstrap_standard_errors(df, replicates=BOOTSTRAP_REPLICATES, seed=0, alpha
     return label_coefficients(encoder, draws.std(axis=0, ddof=1), "se")
 
 
+def cluster_robust_se(person, cluster, residual):
+    """Standard error of each person's mean residual, clustered on the game.
+
+    A closed-form alternative to bootstrapping the errors. Each person's joint
+    effect is very nearly their mean residual here — the ridge shrinks by a few
+    percent and the partner correction is about 0.05 per 100 against errors ten
+    times that — so the clustered standard error of a mean is a good stand-in,
+    and it costs one pass instead of a hundred refits.
+
+    Clustering on the game is the same requirement the bootstrap has: calls
+    inside one game are not independent draws."""
+    frame = pd.DataFrame({"person": person, "cluster": cluster, "residual": residual})
+    centred = frame["residual"] - frame.groupby("person")["residual"].transform("mean")
+    by_cluster = centred.groupby([frame["person"], frame["cluster"]]).sum()
+    return np.sqrt(by_cluster.pow(2).groupby(level=0).sum()) / frame.groupby("person").size()
+
+
 def naive_effects(df):
     """Mean residual per person, ignoring who they worked with. Only kept as the
     comparison that shows what the joint fit is buying."""
@@ -325,6 +342,22 @@ def _self_check():
     # keeps the contamination the joint fit removes. Without this the figure
     # comparing the two would be measuring regularisation, not confounding.
     assert marginal[("umpire", 0)] > joint[("umpire", 0)] + 0.02, marginal[("umpire", 0)]
+
+    # Clustering is not optional. With residuals correlated inside a game, an
+    # error that assumes independent pitches is far too small; the clustered one
+    # has to see that and come back several times wider.
+    games = np.repeat(np.arange(300), 20)
+    per_game = rng.normal(0, 0.25, 300)
+    correlated = per_game[games] + rng.normal(0, 0.05, len(games))
+    person = np.zeros(len(games), dtype=int)
+    clustered = cluster_robust_se(person, games, correlated).iloc[0]
+    independent = correlated.std(ddof=1) / np.sqrt(len(correlated))
+    assert clustered > 3 * independent, (clustered, independent)
+
+    # With no within-game correlation the two agree instead.
+    plain = rng.normal(0, 0.25, len(games))
+    loose = cluster_robust_se(person, games, plain).iloc[0]
+    assert abs(loose / (plain.std(ddof=1) / np.sqrt(len(plain))) - 1) < 0.2, loose
 
     # Standard errors resample whole games, so the umpire is fixed within one,
     # as he is in reality. Umpire 3 works a thirtieth of the slate and must come
