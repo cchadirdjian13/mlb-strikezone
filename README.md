@@ -82,19 +82,23 @@ Savant and is not committed.
 uv sync
 uv run python src/mlb_strikezone/ingest.py 2015 2016 2017 2018 2019 2020 2021 2022 2023 2024 2025
 uv run python src/mlb_strikezone/features.py
+uv run python src/mlb_strikezone/umpires.py
 uv run python src/mlb_strikezone/analysis.py
 ```
 
 The ingest step is the slow one — it pulls a month at a time and caches one
 parquet per season under `data/raw/`, skipping any season already present.
-`features.py` builds `data/processed/called_pitches.parquet` (3.7M rows);
-`analysis.py` prints the tables above and writes the four figures.
+`features.py` builds `data/processed/called_pitches.parquet` (3.7M rows).
+`umpires.py` is quick — one MLB Stats API call per season gets the whole
+umpiring crew, so 11 requests cover 25,193 games. `analysis.py` prints the
+tables above and writes the four figures.
 
 Each module self-tests without touching the data:
 
 ```bash
 uv run python src/mlb_strikezone/ingest.py --check
 uv run python src/mlb_strikezone/features.py --check
+uv run python src/mlb_strikezone/umpires.py --check
 uv run python src/mlb_strikezone/analysis.py --check
 ```
 
@@ -105,14 +109,14 @@ uv run python src/mlb_strikezone/analysis.py --check
   catchers set up all shift with the count, and none of that is controlled for
   here.
 - 2020 is a 60-game season and is roughly a third the sample of the others.
-- No umpire attribution yet. Ranking umpires or catchers requires controlling
-  for location first, which is what the model below is for.
+- No umpire attribution yet. The plate umpire for all 25,193 games is joined and
+  ready (129 of 138 umpires clear 2,000 called pitches), but ranking anyone
+  requires controlling for location first, which is what the model below is for.
 
 ## Next
 
 - Logistic regression on location, count and handedness as a baseline, then
   gradient boosting adding pitch type and velocity; evaluated on log-loss and
   calibration.
-- Home-plate umpire per `game_pk` from the MLB Stats API, so the residual
-  (actual call − predicted strike probability) can be attributed to individual
-  umpires and catchers.
+- Attribute the residual (actual call − predicted strike probability) to
+  individual umpires and catchers.
