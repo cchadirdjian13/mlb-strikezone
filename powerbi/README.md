@@ -1,8 +1,10 @@
 # Power BI model
 
 A star schema over the analysis output, built by `export.py`. The tables in
-`data/` are CSV, small enough to import directly — no gateway, no connector, no
-scheduled refresh.
+`tables/` are CSV, small enough to import directly — no gateway, no connector,
+no scheduled refresh. They are named `tables/` rather than `data/` because
+`.gitignore` ignores `data/` at any depth, and these have to be committed for
+the model to be openable from a clone.
 
 Rebuild them with:
 
@@ -36,7 +38,7 @@ a visual should show the twelve real counts only.
 
 ## Loading
 
-1. **Home → Get data → Text/CSV**, and load all nine files from `data/`.
+1. **Home → Get data → Text/CSV**, and load all nine files from `tables/`.
 2. In each query, check Power Query typed the columns sensibly — `season` as
    Whole Number, the `_per_100` and rate columns as Decimal Number, the
    `clears_zero` / `qualified` / `short_season` / `specific_count` columns as

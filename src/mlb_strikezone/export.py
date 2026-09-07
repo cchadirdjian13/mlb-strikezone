@@ -32,7 +32,9 @@ APP_ATTRIBUTION = APP_DATA / "attribution.parquet"
 APP_SEASONS = APP_DATA / "season_effects.parquet"
 
 # Power BI reads CSV without a connector or a gateway, and these are small.
-POWERBI = Path("powerbi/data")
+# Named tables/ rather than data/, because .gitignore ignores data/ at any depth
+# and these have to be committed for the model to be openable from a clone.
+POWERBI = Path("powerbi/tables")
 
 ANY = "Any"
 STANDS = [ANY, "R", "L"]
