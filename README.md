@@ -73,6 +73,45 @@ Two choices worth stating plainly:
   understates two-strike area and inflates the headline number — this analysis
   reported 42.7% before the fix and 36.0% after.
 
+## Modelling the call
+
+Ranking umpires means asking whether a call differs from what the pitch itself
+predicted, so the zone has to be modelled before anyone is blamed for it. Two
+models, both cross-validated in five folds **grouped on `game_pk`**: pitches
+within a game share an umpire, a park and a day's conditions, so splitting on
+pitches would leak all of that across the fold boundary and flatter the result.
+Every pitch gets a probability from a model that never saw its game.
+
+| | log loss | Brier | AUC |
+| --- | --- | --- | --- |
+| always predict the base rate | 0.6350 | — | — |
+| logistic, location + count + handedness | 0.1869 | 0.0581 | 0.9761 |
+| gradient boosting, + pitch type and velocity | 0.1716 | 0.0532 | 0.9798 |
+
+Those headline numbers flatter both models, because two thirds of taken pitches
+are obvious. Restricting to the **contested band** — pitches the model itself
+puts between 0.1 and 0.9 — is the honest test, and there the two are close:
+0.5587 against 0.5503 log loss, over roughly 900,000 pitches, about a quarter
+of the data. Neither model discriminates well on a coin flip, which is the
+point: those are the calls that are genuinely up to the umpire.
+
+Where they differ is calibration, and it is not a small difference.
+
+![Calibration error](figures/calibration.png)
+
+The logistic baseline is systematically overconfident straight through the
+contested band, peaking at **3.6 percentage points** too high around a
+predicted 0.62. The gradient booster stays within 1.2 points across the same
+range. That gap is the whole reason attribution uses the boosted model's
+residuals: a 3.6-point bias sitting in the middle of the contested band is
+larger than the umpire effects being measured, and would be silently
+redistributed onto individual umpires as if it were their behaviour.
+
+Note the chart plots *error*, observed minus predicted, rather than observed
+against predicted. On a conventional diagonal calibration plot both models look
+perfect — the first version of this chart used equal-count bins and put six of
+ten points below 0.03, which hid the bow entirely.
+
 ## Reproducing
 
 Python 3.12 via [uv](https://docs.astral.sh/uv/). Data is pulled from Baseball
@@ -84,6 +123,7 @@ uv run python src/mlb_strikezone/ingest.py 2015 2016 2017 2018 2019 2020 2021 20
 uv run python src/mlb_strikezone/features.py
 uv run python src/mlb_strikezone/umpires.py
 uv run python src/mlb_strikezone/analysis.py
+uv run python src/mlb_strikezone/model.py
 ```
 
 The ingest step is the slow one — it pulls a month at a time and caches one
@@ -91,7 +131,12 @@ parquet per season under `data/raw/`, skipping any season already present.
 `features.py` builds `data/processed/called_pitches.parquet` (3.7M rows).
 `umpires.py` is quick — one MLB Stats API call per season gets the whole
 umpiring crew, so 11 requests cover 25,193 games. `analysis.py` prints the
-tables above and writes the four figures.
+tables above and writes the four zone figures.
+
+`model.py` is the other slow one — ten model fits over 3.7M pitches. It writes
+`data/processed/predictions.parquet` and then reports from that file, so a
+rerun reuses the saved predictions and only re-derives the scores and the
+calibration chart. Pass `--refit` to actually fit again.
 
 Each module self-tests without touching the data:
 
@@ -100,6 +145,7 @@ uv run python src/mlb_strikezone/ingest.py --check
 uv run python src/mlb_strikezone/features.py --check
 uv run python src/mlb_strikezone/umpires.py --check
 uv run python src/mlb_strikezone/analysis.py --check
+uv run python src/mlb_strikezone/model.py --check
 ```
 
 ## Limitations
@@ -109,14 +155,21 @@ uv run python src/mlb_strikezone/analysis.py --check
   catchers set up all shift with the count, and none of that is controlled for
   here.
 - 2020 is a 60-game season and is roughly a third the sample of the others.
-- No umpire attribution yet. The plate umpire for all 25,193 games is joined and
-  ready (129 of 138 umpires clear 2,000 called pitches), but ranking anyone
-  requires controlling for location first, which is what the model below is for.
+- No umpire attribution yet. The plate umpire for all 25,193 games is joined,
+  the model is fitted, and the out-of-fold residuals exist — but nobody is
+  ranked here.
+- The model knows where the pitch was and what it was, not who was behind the
+  plate or who caught it. That is deliberate: those are the effects to be
+  measured, so they must stay out of the prediction.
 
 ## Next
 
-- Logistic regression on location, count and handedness as a baseline, then
-  gradient boosting adding pitch type and velocity; evaluated on log-loss and
-  calibration.
-- Attribute the residual (actual call − predicted strike probability) to
-  individual umpires and catchers.
+Attribute the residual (actual call − predicted strike probability) to
+individual umpires and catchers, **fitting both jointly**. A given catcher's
+framing shows up in the residual of every umpire he works with, and vice versa;
+ranking them from separate fits would count the same edge calls twice and
+credit them to both. One fit with both sets of effects competing for the same
+variance is the only way the numbers mean what they claim to.
+
+129 of 138 umpires clear the 2,000 called-pitch minimum, and the contested band
+alone holds roughly 890,000 pitches, so the sample is there.
