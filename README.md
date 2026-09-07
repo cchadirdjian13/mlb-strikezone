@@ -339,11 +339,18 @@ by season history, and redraw the zone for any count and batter side.
 ![The Streamlit view](figures/streamlit_app.png)
 
 ```bash
-uv run streamlit run src/mlb_strikezone/app.py
+uv run streamlit run streamlit_app.py
 ```
 
-It reads only the generated parquet files, and says which pipeline step to run
-if one is missing rather than failing on an empty directory.
+It says which pipeline step to run if something is missing, rather than failing
+on an empty directory.
+
+The app reads `app_data/`, not `data/`. That directory is committed and totals
+about half a megabyte, because the zone tab does not need 3.7 million pitches —
+it needs a 40 by 40 grid per count and batter side, which is 39 grids. `export.py`
+precomputes them, turning a 154 MB dependency into 211 KB and letting the app be
+deployed from this repo with nothing else attached. `data/` stays gitignored and
+holds the tables everything was actually measured from.
 
 ## Reproducing
 
@@ -359,6 +366,7 @@ uv run python src/mlb_strikezone/analysis.py
 uv run python src/mlb_strikezone/model.py
 uv run python src/mlb_strikezone/attribution.py
 uv run python src/mlb_strikezone/drift.py
+uv run python src/mlb_strikezone/export.py
 ```
 
 The ingest step is the slow one — it pulls a month at a time and caches one
@@ -388,6 +396,7 @@ uv run python src/mlb_strikezone/analysis.py --check
 uv run python src/mlb_strikezone/model.py --check
 uv run python src/mlb_strikezone/attribution.py --check
 uv run python src/mlb_strikezone/drift.py --check
+uv run python src/mlb_strikezone/export.py --check
 uv run python src/mlb_strikezone/app.py --check
 ```
 

@@ -13,8 +13,6 @@ from pybaseball import cache, playerid_reverse_lookup
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import OneHotEncoder
 
-cache.enable()
-
 PROCESSED = Path("data/processed")
 PREDICTIONS = PROCESSED / "predictions.parquet"
 UMPIRES = PROCESSED / "umpires.parquet"
@@ -186,6 +184,10 @@ def naive_effects(df):
 
 def add_names(effects, df):
     """Umpire names ride along with the umpire table; players need a lookup."""
+    # Enabled here rather than at import. The Streamlit app imports this module
+    # for three constants and should not be configuring a download cache, or
+    # writing to disk, just by being started on someone else's host.
+    cache.enable()
     umpire_names = (
         df[["ump_id", "ump_name"]].drop_duplicates().set_index("ump_id")["ump_name"]
     )
