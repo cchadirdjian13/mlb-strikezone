@@ -126,25 +126,25 @@ below which a number isn't worth believing.
 
 Effects are in called strikes per 100 taken pitches, net of the other party.
 
-| umpire | pitches | per 100 | extra strikes |
-| --- | --- | --- | --- |
-| Doug Eddings | 45,238 | **+3.06** | +1,385 |
-| Bill Miller | 47,280 | +2.42 | +1,144 |
-| Lance Barrett | 45,452 | +1.88 | +855 |
-| … | | | |
-| Mark Wegner | 41,910 | −1.64 | −689 |
-| Alfonso Márquez | 46,604 | −1.60 | −747 |
-| Tom Woodring | 13,354 | **−1.78** | −237 |
+| umpire | pitches | per 100 | SE | extra strikes |
+| --- | --- | --- | --- | --- |
+| Doug Eddings | 45,238 | **+3.06** | 0.16 | +1,385 |
+| Bill Miller | 47,280 | +2.42 | 0.15 | +1,144 |
+| Lance Barrett | 45,452 | +1.88 | 0.17 | +855 |
+| … | | | | |
+| Mark Wegner | 41,910 | −1.64 | 0.14 | −689 |
+| Alfonso Márquez | 46,604 | −1.60 | 0.12 | −747 |
+| Tom Woodring | 13,354 | **−1.78** | 0.22 | −237 |
 
-| catcher | pitches | per 100 | extra strikes |
-| --- | --- | --- | --- |
-| Tyler Flowers | 31,597 | **+2.59** | +820 |
-| Yasmani Grandal | 62,725 | +2.08 | +1,307 |
-| Austin Hedges | 49,954 | +1.98 | +987 |
-| … | | | |
-| Isiah Kiner-Falefa | 5,065 | −2.04 | −103 |
-| Edgar Quero | 4,807 | −2.14 | −103 |
-| Ramón Cabrera | 3,670 | **−2.46** | −90 |
+| catcher | pitches | per 100 | SE | extra strikes |
+| --- | --- | --- | --- | --- |
+| Tyler Flowers | 31,597 | **+2.59** | 0.16 | +820 |
+| Yasmani Grandal | 62,725 | +2.08 | 0.10 | +1,307 |
+| Austin Hedges | 49,954 | +1.98 | 0.11 | +987 |
+| … | | | | |
+| Isiah Kiner-Falefa | 5,065 | −2.04 | 0.28 | −103 |
+| Edgar Quero | 4,807 | −2.14 | 0.28 | −103 |
+| Ramón Cabrera | 3,670 | **−2.46** | 0.32 | −90 |
 
 **Catchers move the zone about as much as umpires do.** The umpire spread across
 129 qualifiers is 4.8 calls per 100; the catcher spread across 205 is 5.1. Who
@@ -156,6 +156,35 @@ count, handedness, pitch type and velocity, and the residual is attributed
 blind. It independently returns Flowers, Grandal, Hedges, Mathis, Barnes,
 Trevino and Posey at the top, which is essentially the framing leaderboard the
 public metrics have been publishing for a decade.
+
+### How much of this ranking is real
+
+Standard errors come from a bootstrap that resamples **whole games**, 200
+replicates. The unit matters: within a game the umpire is fixed and the calls
+share a park, a day and a zone, so resampling individual pitches would treat
+thousands of correlated calls as independent draws and report errors several
+times too small.
+
+The median standard error is 0.17 calls per 100 for umpires and 0.20 for
+catchers. That is small against the extremes and not against the middle.
+
+![Leaderboard with two-standard-error bars](figures/attribution_caterpillar.png)
+
+Two things follow, and both are constraints on how the table above should be
+read:
+
+- **Only 80 of 129 umpires, and 127 of 205 catchers, are more than two standard
+  errors from zero.** The rest of each list is indistinguishable from having no
+  effect at all. Every name shown in the tables above clears that bar
+  comfortably; the middle of the leaderboard does not.
+- **Adjacent ranks are not real.** Separating two people needs roughly 0.5 calls
+  per 100 between them. Doug Eddings really is above Bill Miller, but Nick
+  Mahrley at +1.40 and Mike Estabrook at +1.38 are one person in two rows, and
+  no amount of ranking them will change that.
+
+These are the standard errors of the shrunken estimate — they describe how much
+the ridge coefficient would move under resampling, not the full uncertainty
+about a person's true effect, which also carries the shrinkage bias.
 
 ### The joint fit changed less than expected
 
@@ -206,8 +235,9 @@ rerun reuses the saved predictions and only re-derives the scores and the
 calibration chart. Pass `--refit` to actually fit again.
 
 `attribution.py` reads those predictions back, fits the joint leaderboard and
-writes `data/processed/attribution.parquet`. It takes seconds — the ridge is
-sparse, two non-zeros per row.
+writes `data/processed/attribution.parquet`. The ridge itself takes seconds —
+it is sparse, two non-zeros per row — and the 200 bootstrap replicates behind
+the standard errors take about three minutes.
 
 Each module self-tests without touching the data:
 
@@ -232,8 +262,9 @@ uv run python src/mlb_strikezone/attribution.py --check
   measured, so they must stay out of the prediction.
 - Attribution is a linear fit on residuals, not a logistic one with an offset.
   The residual is heteroscedastic, so the estimates are interpretable but not
-  efficient, and no standard errors are reported. Treat the ordering as
-  indicative and the gap between adjacent names as noise.
+  efficient. The standard errors are bootstrapped rather than read off the fit,
+  so they do not inherit that inefficiency, but they describe the shrunken
+  estimate and not the shrinkage bias.
 - A catcher's effect absorbs anything correlated with him that the model does
   not see — his pitching staff's command, his team's park, the pitch mix he
   calls. It is a catcher-shaped residual, not a measurement of framing skill in
@@ -248,10 +279,6 @@ The pipeline is complete end to end: ingest, called-pitch table, umpires,
 descriptive zone, model, attribution. What would sharpen it, roughly in order
 of value per unit of work:
 
-- **Standard errors on the leaderboard.** The ordering is currently indicative
-  and the gaps between adjacent names are unquantified. Bootstrapping over
-  games would fix that, and would say which of the 129 umpires are actually
-  distinguishable from the middle.
 - **Effects by season rather than pooled.** An umpire's zone in 2015 and in
   2025 are averaged together here, which hides both drift and the effect of the
   crossover that makes the joint fit identifiable.
