@@ -38,7 +38,7 @@ GBM_FEATURES = BASELINE_FEATURES + ["p_throws", "pitch_type", "release_speed"]
 GBM_CATEGORICAL = CATEGORICAL + ["p_throws", "pitch_type"]
 
 # Carried through so the attribution step can join without re-reading the pitches.
-CARRY = [GROUP, "fielder_2"]
+CARRY = [GROUP, "fielder_2", "pitcher"]
 
 POLYNOMIAL_DEGREE = 3
 CALIBRATION_EDGES = np.round(np.arange(0, 1.05, 0.05), 2)

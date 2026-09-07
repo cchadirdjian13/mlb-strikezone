@@ -18,37 +18,39 @@ from mlb_strikezone.analysis import (
     Z_CENTERS,
     Z_EDGES,
     ZONE_HALF_WIDTH,
-    strike_rate_grid,
     zone_area,
 )
-from mlb_strikezone.attribution import ATTRIBUTION, MIN_PITCHES
-from mlb_strikezone.drift import SEASON_EFFECTS
+from mlb_strikezone.attribution import MIN_PITCHES, ROLES
+from mlb_strikezone.export import (
+    ANY,
+    APP_ATTRIBUTION,
+    APP_SEASONS,
+    STANDS,
+    ZONE_GRIDS,
+    zone_grids,
+)
 
-CALLED_PITCHES = Path("data/processed/called_pitches.parquet")
-ZONE_COLUMNS = ["plate_x", "plate_z", "is_strike", "count", "stand", "sz_top", "sz_bot"]
-
+# Everything here is read from app_data/, which is committed. The app deliberately
+# does not touch data/, so it can be deployed from the repo alone.
 REQUIRED = {
-    ATTRIBUTION: "attribution.py",
-    SEASON_EFFECTS: "drift.py",
-    CALLED_PITCHES: "features.py",
+    APP_ATTRIBUTION: "attribution.py, then export.py",
+    APP_SEASONS: "drift.py, then export.py",
+    ZONE_GRIDS: "export.py",
 }
 
 
 def load_attribution():
-    return pd.read_parquet(ATTRIBUTION)
+    return pd.read_parquet(APP_ATTRIBUTION)
 
 
 def load_season_effects(names):
     """Per-season effects carry ids but no names; the pooled table has both."""
-    seasons = pd.read_parquet(SEASON_EFFECTS)
+    seasons = pd.read_parquet(APP_SEASONS)
     return seasons.merge(names[["role", "id", "name"]], on=["role", "id"], how="left")
 
 
-def load_pitches(columns):
-    """Columns are an argument, not a global read inside the body, so that the
-    Streamlit cache key changes when they do. Read as a global, adding a column
-    leaves the old frame cached and the new column missing at runtime."""
-    return pd.read_parquet(CALLED_PITCHES, columns=list(columns))
+def load_zone_grids():
+    return pd.read_parquet(ZONE_GRIDS)
 
 
 def leaderboard(effects, role, min_pitches):
@@ -75,16 +77,23 @@ def trajectory(seasons, role, name):
     )[["season", "pitches", "per_100", "lo", "hi"]].set_index("season")
 
 
-def zone_frame(pitches, count, stand):
-    """Filter to a count and batter side. 'Any' keeps everything."""
-    if count != "Any":
-        pitches = pitches[pitches["count"] == count]
-    if stand != "Any":
-        pitches = pitches[pitches["stand"] == stand]
-    return pitches
+def zone_selection(grids, count, stand):
+    """The stored cells for one count and batter side."""
+    return grids[(grids["count"] == count) & (grids["stand"] == stand)]
 
 
-def zone_figure(pitches, rate):
+def grid_array(selection):
+    """Rebuild the 40 by 40 grid from stored cells, NaNs and all.
+
+    Cells are addressed by their stored index rather than by row order, so the
+    picture cannot silently transpose or shift if the file is ever written in a
+    different order."""
+    rate = np.full((len(X_CENTERS), len(Z_CENTERS)), np.nan, dtype=float)
+    rate[selection["ix"].to_numpy(), selection["iz"].to_numpy()] = selection["rate"]
+    return rate
+
+
+def zone_figure(bottom, top, rate):
     """Heatmap, 50% contour and the mean rulebook box, drawn the way the README
     figures are. Streamlit's built-in scatter leaves gaps between grid cells and
     cannot draw the box, which would make the caption describe a chart that is
@@ -94,7 +103,6 @@ def zone_figure(pitches, rate):
     ax.contour(X_CENTERS, Z_CENTERS, np.nan_to_num(rate).T, levels=[0.5],
                colors="black", linewidths=1.5)
 
-    bottom, top = pitches["sz_bot"].mean(), pitches["sz_top"].mean()
     ax.plot(
         [-ZONE_HALF_WIDTH, ZONE_HALF_WIDTH, ZONE_HALF_WIDTH, -ZONE_HALF_WIDTH, -ZONE_HALF_WIDTH],
         [bottom, bottom, top, top, bottom],
@@ -143,7 +151,7 @@ def main():
     with board_tab:
         left, right = st.columns([1, 3])
         with left:
-            role = st.radio("role", ["umpire", "catcher"])
+            role = st.radio("role", list(ROLES.values()))
             floor = st.slider(
                 "minimum called pitches", 0, 20_000, MIN_PITCHES, step=500,
                 help="Below about 2,000 an effect is not worth reading on its own.",
@@ -189,22 +197,27 @@ def main():
         )
         picker, chart = st.columns([1, 3])
         with picker:
-            count = st.selectbox("count", ["Any"] + COUNTS)
-            stand = st.radio("batter side", ["Any", "R", "L"])
+            count = st.selectbox("count", [ANY] + COUNTS)
+            stand = st.radio("batter side", STANDS)
 
-        pitches = st.cache_data(load_pitches)(tuple(ZONE_COLUMNS))
-        selected = zone_frame(pitches, count, stand)
+        grids = st.cache_data(load_zone_grids)()
+        selection = zone_selection(grids, count, stand)
 
         with chart:
-            if len(selected) < 5_000:
-                st.warning(f"Only {len(selected):,} pitches match; the grid would be noise.")
+            pitches = int(selection["pitches"].iloc[0])
+            if pitches < 5_000:
+                st.warning(f"Only {pitches:,} pitches match; the grid would be noise.")
             else:
-                rate = strike_rate_grid(selected)
-                st.pyplot(zone_figure(selected, rate))
+                rate = grid_array(selection)
+                st.pyplot(
+                    zone_figure(
+                        selection["sz_bot"].iloc[0], selection["sz_top"].iloc[0], rate
+                    )
+                )
                 st.metric(
                     "50% zone area",
                     f"{zone_area(rate):.2f} sq ft",
-                    help=f"Measured over {len(selected):,} taken pitches.",
+                    help=f"Measured over {pitches:,} taken pitches.",
                 )
 
 
@@ -249,32 +262,38 @@ def _self_check():
     assert abs(line.loc[2015, "lo"] - 0.0) < 1e-9, line.loc[2015, "lo"]
     assert trajectory(seasons, "umpire", "Nobody").empty
 
-    # Built with exactly the columns the loader reads, so the zone path is
-    # exercised against its real contract. Adding a column to a figure without
-    # adding it to ZONE_COLUMNS fails here rather than in the running app.
+    # Grids come from export.py, so build the fixture with it rather than by
+    # hand: a change to the stored layout then fails here, not in a browser.
     rng = np.random.default_rng(0)
-    size = 4_000
-    pitches = pd.DataFrame(
-        {
-            "plate_x": rng.uniform(-1.5, 1.5, size),
-            "plate_z": rng.uniform(1.0, 4.0, size),
-            "is_strike": rng.random(size) < 0.3,
-            "count": rng.choice(["0-0", "3-0"], size),
-            "stand": rng.choice(["R", "L"], size),
-            "sz_top": np.full(size, 3.4),
-            "sz_bot": np.full(size, 1.6),
-        }
-    )[ZONE_COLUMNS]
+    size = 30_000
+    grids = zone_grids(
+        pd.DataFrame(
+            {
+                "plate_x": rng.uniform(-1.5, 1.5, size),
+                "plate_z": rng.uniform(1.0, 4.0, size),
+                "is_strike": rng.random(size) < 0.3,
+                "count": rng.choice(COUNTS, size),
+                "stand": rng.choice(["R", "L"], size),
+                "sz_top": np.full(size, 3.4),
+                "sz_bot": np.full(size, 1.6),
+            }
+        )
+    )
 
-    # "Any" is a genuine no-op on both axes; naming either one narrows.
-    assert len(zone_frame(pitches, "Any", "Any")) == size
-    assert len(zone_frame(pitches, "0-0", "Any")) < size
-    narrowed = zone_frame(pitches, "0-0", "R")
-    assert 0 < len(narrowed) < len(zone_frame(pitches, "0-0", "Any"))
+    selection = zone_selection(grids, ANY, ANY)
+    assert len(selection) == len(X_CENTERS) * len(Z_CENTERS), len(selection)
+    assert int(selection["pitches"].iloc[0]) == size
+
+    # The grid rebuilds by stored index, so a shuffled file gives the same picture.
+    rate = grid_array(selection)
+    assert rate.shape == (len(X_CENTERS), len(Z_CENTERS))
+    shuffled = grid_array(selection.sample(frac=1.0, random_state=1))
+    assert np.array_equal(rate, shuffled, equal_nan=True), "grid depends on row order"
+    assert np.isfinite(rate).any(), "grid is entirely empty"
 
     # Both figures build end to end. They are presentation, but a broken axis or
     # a missing column would only show up by clicking through the running app.
-    zone = zone_figure(narrowed, strike_rate_grid(narrowed))
+    zone = zone_figure(selection["sz_bot"].iloc[0], selection["sz_top"].iloc[0], rate)
     assert zone.axes, "zone figure drew nothing"
     plt.close(zone)
 

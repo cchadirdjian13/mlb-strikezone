@@ -13,8 +13,6 @@ from pybaseball import cache, playerid_reverse_lookup
 from sklearn.linear_model import Ridge
 from sklearn.preprocessing import OneHotEncoder
 
-cache.enable()
-
 PROCESSED = Path("data/processed")
 PREDICTIONS = PROCESSED / "predictions.parquet"
 UMPIRES = PROCESSED / "umpires.parquet"
@@ -31,12 +29,23 @@ MIN_PITCHES = 2000
 # Enough to pin a standard error; percentile intervals would want far more.
 BOOTSTRAP_REPLICATES = 200
 
-ROLES = {"ump_id": "umpire", "fielder_2": "catcher"}
+ROLES = {"ump_id": "umpire", "fielder_2": "catcher", "pitcher": "pitcher"}
+
+# Umpire ids come from the MLB Stats API and are named in umpires.parquet.
+# Catchers and pitchers are MLBAM player ids and need the Chadwick register.
+PLAYER_ROLES = ["catcher", "pitcher"]
+
+ROLE_COLOURS = {"umpire": "#c1442f", "catcher": "#3b6ea5", "pitcher": "#4f9153"}
 
 
 def load():
     """One row per called pitch with its out-of-fold residual, umpire and catcher."""
     pitches = pd.read_parquet(PREDICTIONS)
+    missing = [column for column in ROLES if column not in pitches.columns and column != "ump_id"]
+    if missing:
+        raise RuntimeError(
+            f"{PREDICTIONS} has no {missing} column; rerun model.py --refit to carry it"
+        )
     umpires = pd.read_parquet(UMPIRES, columns=["game_pk", "ump_id", "ump_name"])
 
     before = len(pitches)
@@ -73,13 +82,22 @@ def build_design(df):
     return encoder.fit_transform(df[list(ROLES)]), encoder
 
 
+def role_bounds(encoder):
+    """Where each role's block of one-hot columns starts and ends."""
+    edges = np.cumsum([0] + [len(categories) for categories in encoder.categories_])
+    return {
+        role: slice(start, stop)
+        for role, start, stop in zip(ROLES.values(), edges[:-1], edges[1:])
+    }
+
+
 def label_coefficients(encoder, coefficients, column):
     """Split a flat coefficient vector back into per-role, per-person rows."""
-    split = np.split(coefficients, [len(encoder.categories_[0])])
+    bounds = role_bounds(encoder)
     return pd.concat(
         [
-            pd.DataFrame({"role": role, "id": categories, column: values})
-            for role, categories, values in zip(ROLES.values(), encoder.categories_, split)
+            pd.DataFrame({"role": role, "id": categories, column: coefficients[bounds[role]]})
+            for role, categories in zip(ROLES.values(), encoder.categories_)
         ],
         ignore_index=True,
     )
@@ -165,18 +183,22 @@ def naive_effects(df):
 
 
 def add_names(effects, df):
-    """Umpire names ride along with the umpire table; catchers are MLBAM ids."""
+    """Umpire names ride along with the umpire table; players need a lookup."""
+    # Enabled here rather than at import. The Streamlit app imports this module
+    # for three constants and should not be configuring a download cache, or
+    # writing to disk, just by being started on someone else's host.
+    cache.enable()
     umpire_names = (
         df[["ump_id", "ump_name"]].drop_duplicates().set_index("ump_id")["ump_name"]
     )
-    catcher_ids = effects.loc[effects["role"] == "catcher", "id"].astype(int).tolist()
-    people = playerid_reverse_lookup(catcher_ids, key_type="mlbam")
-    catcher_names = (
-        people.assign(name=people["name_first"].str.title() + " " + people["name_last"].str.title())
-        .set_index("key_mlbam")["name"]
-    )
+    is_player = effects["role"].isin(PLAYER_ROLES)
+    player_ids = effects.loc[is_player, "id"].astype(int).unique().tolist()
+    people = playerid_reverse_lookup(player_ids, key_type="mlbam")
+    player_names = people.assign(
+        name=people["name_first"].str.title() + " " + people["name_last"].str.title()
+    ).set_index("key_mlbam")["name"]
 
-    names = effects["id"].map(catcher_names).where(effects["role"] == "catcher")
+    names = effects["id"].map(player_names).where(is_player)
     return effects.assign(name=names.fillna(effects["id"].map(umpire_names)).fillna(effects["id"]))
 
 
@@ -201,8 +223,9 @@ def figure_caterpillar(effects, path):
     The ranking alone invites reading a table top to bottom as if each row beat
     the one below it. Drawn this way the overlap is the point: the ends separate
     from zero and from each other, the middle does neither."""
-    fig, axes = plt.subplots(1, 2, figsize=(11, 4.5), sharey=True)
-    for ax, (role, color) in zip(axes, [("umpire", "#c1442f"), ("catcher", "#3b6ea5")]):
+    fig, axes = plt.subplots(1, len(ROLE_COLOURS), figsize=(5.5 * len(ROLE_COLOURS), 4.5),
+                             sharey=True)
+    for ax, (role, color) in zip(np.atleast_1d(axes), ROLE_COLOURS.items()):
         subset = (
             effects[(effects["role"] == role) & (effects["pitches"] >= MIN_PITCHES)]
             .sort_values("effect")
@@ -217,7 +240,7 @@ def figure_caterpillar(effects, path):
                    alpha=np.where(clear, 1.0, 0.25))
         ax.axhline(0, color="black", lw=1)
         ax.set_xlabel(f"{role}s, ranked ({clear.sum()} of {len(subset)} clear zero)")
-    axes[0].set_ylabel("called strikes per 100, ±2 SE")
+    np.atleast_1d(axes)[0].set_ylabel("called strikes per 100, ±2 SE")
     fig.suptitle("Where the leaderboard is real and where it is noise")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -231,7 +254,7 @@ def figure_joint_vs_marginal(effects, path):
     the partner correction alone, not a mix of that and regularisation."""
     fig, ax = plt.subplots(figsize=(6, 6))
     limit = 0
-    for role, color in [("umpire", "#c1442f"), ("catcher", "#3b6ea5")]:
+    for role, color in ROLE_COLOURS.items():
         subset = effects[(effects["role"] == role) & (effects["pitches"] >= MIN_PITCHES)]
         ax.scatter(subset["marginal"] * 100, subset["effect"] * 100, s=14, color=color,
                    alpha=0.7, label=f"{role}s (n={len(subset)})")
@@ -307,18 +330,27 @@ def _self_check():
     # and a naive mean should read roughly their sum for the pair.
     rng = np.random.default_rng(0)
     n = 400_000
-    umps, catchers = np.array([0, 1, 2]), np.array([10, 11, 12])
+    umps, catchers, pitchers = np.array([0, 1, 2]), np.array([10, 11, 12]), np.array([20, 21, 22])
     ump = rng.choice(umps, n)
-    paired = rng.random(n) < 0.8
-    catcher = np.where(paired, catchers[ump], rng.choice(catchers, n))
+    catcher = np.where(rng.random(n) < 0.8, catchers[ump], rng.choice(catchers, n))
+    # A pitcher throws to his own team's catcher most of the time, which is the
+    # confounding that makes a catcher's number absorb his staff.
+    catcher_slot = catchers.searchsorted(catcher)
+    pitcher = np.where(rng.random(n) < 0.7, pitchers[catcher_slot], rng.choice(pitchers, n))
 
     ump_effect = np.array([0.05, 0.0, -0.05])
     catcher_effect = np.array([0.05, 0.0, -0.05])
-    truth = ump_effect[ump] + catcher_effect[catchers.searchsorted(catcher)]
+    pitcher_effect = np.array([0.04, 0.0, -0.04])
+    truth = (
+        ump_effect[ump]
+        + catcher_effect[catcher_slot]
+        + pitcher_effect[pitchers.searchsorted(pitcher)]
+    )
     df = pd.DataFrame(
         {
             "ump_id": ump,
             "fielder_2": catcher,
+            "pitcher": pitcher,
             "residual": (truth + rng.normal(0, 0.3, n)).astype("float32"),
         }
     )
@@ -328,11 +360,16 @@ def _self_check():
     marginal = fit_marginal(df).set_index(["role", "id"])["marginal"]
 
     # The joint fit recovers each effect; the naive mean inflates it by soaking
-    # up the partner's, which is the entire reason for fitting them together.
+    # up the partners', which is the entire reason for fitting them together.
     assert abs(joint[("umpire", 0)] - 0.05) < 0.01, joint[("umpire", 0)]
     assert abs(joint[("catcher", 10)] - 0.05) < 0.01, joint[("catcher", 10)]
+    assert abs(joint[("pitcher", 20)] - 0.04) < 0.01, joint[("pitcher", 20)]
     assert naive[("umpire", 0)] > 0.08, naive[("umpire", 0)]
     assert abs(joint[("umpire", 1)]) < 0.01, joint[("umpire", 1)]
+
+    # The catcher's naive number carries his pitcher's effect on top of his own,
+    # which is what adding pitchers to the fit is for.
+    assert naive[("catcher", 10)] > joint[("catcher", 10)] + 0.02, naive[("catcher", 10)]
 
     # Shrinkage pulls toward zero, never past it into the wrong sign.
     assert 0 < joint[("umpire", 0)] <= naive[("umpire", 0)]
@@ -370,6 +407,7 @@ def _self_check():
             "game_pk": games,
             "ump_id": per_game[games],
             "fielder_2": rng.choice(catchers, n),
+            "pitcher": rng.choice(pitchers, n),
             "residual": rng.normal(0, 0.3, n),
         }
     )
