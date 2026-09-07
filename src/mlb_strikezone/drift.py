@@ -13,6 +13,7 @@ from sklearn.linear_model import Ridge
 
 from mlb_strikezone.attribution import (
     PREDICTIONS,
+    ROLE_COLOURS,
     ROLES,
     UMPIRES,
     bootstrap_standard_errors,
@@ -20,6 +21,7 @@ from mlb_strikezone.attribution import (
     cluster_robust_se,
     fit_joint,
     games_as_row_blocks,
+    role_bounds,
 )
 
 PROCESSED = Path("data/processed")
@@ -33,7 +35,12 @@ FIGURES = Path("figures")
 # — hardest of all. That alone would manufacture a convergence trend out of
 # nothing. At 100 the shrinkage is under 5% in every season including 2020.
 SEASON_ALPHA = 100
-SEASON_MIN_PITCHES = 1000
+
+# Per role, because the roles do not accumulate called pitches at the same rate.
+# An umpire works a whole game and a catcher most of one; a starting pitcher is
+# behind maybe a fifth of the taken pitches in his. Holding all three to the same
+# floor empties the pitcher column in 2020 entirely.
+SEASON_MIN_PITCHES = {"umpire": 1000, "catcher": 1000, "pitcher": 500}
 BOOTSTRAP_REPLICATES = 100
 
 # The interval on a season's spread resamples games once. Correcting a
@@ -75,6 +82,10 @@ def corrected_spread(effect, se, doses=1):
     the observed effects, plus the noise of resampling them — so subtracting one
     from a replicate leaves a whole helping behind, and the bootstrap converges
     on the raw standard deviation rather than on the statistic itself."""
+    # A spread needs two people to exist. Without this guard a thin slice still
+    # returns NaN, but through a pile of numpy warnings rather than by saying so.
+    if len(effect) < 2:
+        return float("nan")
     variance = effect.var(ddof=1) - doses * np.mean(np.asarray(se) ** 2)
     return float(np.sqrt(max(variance, 0.0)))
 
@@ -130,10 +141,10 @@ def spread_bootstrap(df, season, outer=OUTER_REPLICATES, seed=0):
     residual = slice_["residual"].to_numpy()
     blocks = games_as_row_blocks(slice_)
     lengths = np.array([len(block) for block in blocks])
-    split_at = len(encoder.categories_[0])
+    bounds = role_bounds(encoder)
     roles = {
-        "umpire": (slice(0, split_at), slice_["ump_id"].to_numpy(), encoder.categories_[0]),
-        "catcher": (slice(split_at, None), slice_["fielder_2"].to_numpy(), encoder.categories_[1]),
+        role: (bounds[role], slice_[column].to_numpy(), categories)
+        for (column, role), categories in zip(ROLES.items(), encoder.categories_)
     }
     rng = np.random.default_rng(seed)
 
@@ -155,7 +166,7 @@ def spread_bootstrap(df, season, outer=OUTER_REPLICATES, seed=0):
                 .reindex(categories)
                 .to_numpy()
             )
-            keep = counts[span] >= SEASON_MIN_PITCHES
+            keep = counts[span] >= SEASON_MIN_PITCHES[role]
             # Two doses: a replicate is noisy about the observed effects, which
             # are themselves noisy about the truth.
             draws[role][replicate] = corrected_spread(effect[span][keep], se[keep], doses=2)
@@ -183,7 +194,7 @@ def summarise_bootstrap(draws, season):
 def spread_by_season(effects):
     rows = []
     for (season, role), group in effects.groupby(["season", "role"]):
-        qualified = group[group["pitches"] >= SEASON_MIN_PITCHES]
+        qualified = group[group["pitches"] >= SEASON_MIN_PITCHES[role]]
         rows.append(
             {
                 "season": season,
@@ -228,7 +239,7 @@ def trend(subset):
 
 def figure_spread(spreads, path):
     fig, ax = plt.subplots(figsize=(7.5, 4.5))
-    for role, color in [("umpire", "#c1442f"), ("catcher", "#3b6ea5")]:
+    for role, color in ROLE_COLOURS.items():
         subset = spreads[spreads["role"] == role]
         if "lo" in subset:
             ax.fill_between(subset["season"], subset["lo"], subset["hi"],
@@ -276,13 +287,14 @@ def report():
     )
     for role in ROLES.values():
         print(f"\n{role}s, spread by season (per 100 called pitches, "
-              f"n >= {SEASON_MIN_PITCHES:,})")
+              f"n >= {SEASON_MIN_PITCHES[role]:,})")
         print(
             spreads[spreads["role"] == role]
             .drop(columns=["role"])
             .to_string(index=False, float_format=lambda v: f"{v:.3f}")
         )
 
+    spreads = spreads.dropna(subset=["spread", "lo", "hi"])
     lift = (spreads["draw_median"] - spreads["spread"]).mean()
     outside = ((spreads["spread"] < spreads["lo"]) | (spreads["spread"] > spreads["hi"])).sum()
     print(f"\nbootstrap draws sit {lift:+.3f} from the statistic on average; "
@@ -337,6 +349,11 @@ def _self_check():
 
     # All noise and no signal clamps at zero rather than returning a NaN.
     assert corrected_spread(rng.normal(0, 0.005, 500), np.full(500, 0.05)) == 0.0
+
+    # A slice too thin to have a spread says so quietly. 2020 has no pitcher
+    # clearing a full season's floor, and numpy would otherwise warn per call.
+    assert np.isnan(corrected_spread(np.array([]), np.array([])))
+    assert np.isnan(corrected_spread(np.array([0.01]), np.array([0.001])))
 
     # A bootstrap replicate is noisy about the observed effects, which are
     # already noisy about the truth, so it carries two helpings of error. The

@@ -21,7 +21,7 @@ from mlb_strikezone.analysis import (
     strike_rate_grid,
     zone_area,
 )
-from mlb_strikezone.attribution import ATTRIBUTION, MIN_PITCHES
+from mlb_strikezone.attribution import ATTRIBUTION, MIN_PITCHES, ROLES
 from mlb_strikezone.drift import SEASON_EFFECTS
 
 CALLED_PITCHES = Path("data/processed/called_pitches.parquet")
@@ -143,7 +143,7 @@ def main():
     with board_tab:
         left, right = st.columns([1, 3])
         with left:
-            role = st.radio("role", ["umpire", "catcher"])
+            role = st.radio("role", list(ROLES.values()))
             floor = st.slider(
                 "minimum called pitches", 0, 20_000, MIN_PITCHES, step=500,
                 help="Below about 2,000 an effect is not worth reading on its own.",

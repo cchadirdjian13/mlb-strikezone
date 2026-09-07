@@ -115,40 +115,57 @@ ten points below 0.03, which hid the bow entirely.
 ## Who moves the zone
 
 With a calibrated probability per pitch, the residual — actual call minus
-predicted probability — is what location cannot explain. Umpires and catchers
-are fitted to that residual **together**, in one ridge regression with both sets
-of effects side by side. Fitting them separately would double-count: a
-catcher's framing sits in the residual of every umpire he works with, and every
-umpire's tendency sits in the residual of every catcher. The ridge penalty is
-set at 2,000, which in this design reads in pitches — someone with 2,000 called
-pitches keeps about half their raw residual, which is also the sample floor
-below which a number isn't worth believing.
+predicted probability — is what location cannot explain. Three people are in a
+position to move it, and all three are fitted to it **together**, in one ridge
+regression with every set of effects side by side: the umpire calling, the
+catcher receiving, and the pitcher throwing. Fitting any of them separately
+double-counts, because each one's tendency sits in the residual of everyone they
+work with. The ridge penalty is set at 2,000, which in this design reads in
+pitches — someone with 2,000 called pitches keeps about half their raw residual,
+which is also the sample floor below which a number isn't worth believing.
 
 Effects are in called strikes per 100 taken pitches, net of the other party.
 
 | umpire | pitches | per 100 | SE | extra strikes |
 | --- | --- | --- | --- | --- |
-| Doug Eddings | 45,238 | **+3.06** | 0.16 | +1,385 |
+| Doug Eddings | 45,238 | **+3.06** | 0.16 | +1,384 |
 | Bill Miller | 47,280 | +2.42 | 0.15 | +1,144 |
-| Lance Barrett | 45,452 | +1.88 | 0.17 | +855 |
+| Lance Barrett | 45,452 | +1.85 | 0.17 | +839 |
 | … | | | | |
-| Mark Wegner | 41,910 | −1.64 | 0.14 | −689 |
-| Alfonso Márquez | 46,604 | −1.60 | 0.12 | −747 |
-| Tom Woodring | 13,354 | **−1.78** | 0.22 | −237 |
+| Mark Wegner | 41,910 | −1.66 | 0.13 | −694 |
+| Dana DeMuth | 13,984 | −1.69 | 0.24 | −237 |
+| Tom Woodring | 13,354 | **−1.82** | 0.22 | −243 |
 
 | catcher | pitches | per 100 | SE | extra strikes |
 | --- | --- | --- | --- | --- |
-| Tyler Flowers | 31,597 | **+2.59** | 0.16 | +820 |
-| Yasmani Grandal | 62,725 | +2.08 | 0.10 | +1,307 |
-| Austin Hedges | 49,954 | +1.98 | 0.11 | +987 |
+| Tyler Flowers | 31,597 | **+2.56** | 0.16 | +810 |
+| Austin Hedges | 49,954 | +2.05 | 0.11 | +1,023 |
+| Patrick Bailey | 22,425 | +1.92 | 0.18 | +430 |
 | … | | | | |
-| Isiah Kiner-Falefa | 5,065 | −2.04 | 0.28 | −103 |
-| Edgar Quero | 4,807 | −2.14 | 0.28 | −103 |
-| Ramón Cabrera | 3,670 | **−2.46** | 0.32 | −90 |
+| Isiah Kiner-Falefa | 5,065 | −2.07 | 0.28 | −105 |
+| Edgar Quero | 4,807 | −2.00 | 0.28 | −96 |
+| Ramón Cabrera | 3,670 | **−2.23** | 0.30 | −82 |
 
-**Catchers move the zone about as much as umpires do.** The umpire spread across
-129 qualifiers is 4.8 calls per 100; the catcher spread across 205 is 5.1. Who
-is catching is worth roughly as much as who is calling.
+| pitcher | pitches | per 100 | SE | extra strikes |
+| --- | --- | --- | --- | --- |
+| Yusmeiro Petit | 3,476 | **+2.14** | 0.30 | +74 |
+| Jesse Chavez | 6,732 | +2.11 | 0.29 | +142 |
+| Jon Lester | 9,851 | +2.10 | 0.23 | +207 |
+| … | | | | |
+| Yusei Kikuchi | 8,226 | −1.65 | 0.27 | −135 |
+| Framber Valdez | 8,303 | **−1.95** | 0.24 | −162 |
+
+**Catchers move the zone about as much as umpires do, and pitchers move it about
+two thirds as much.** Standard deviations across qualifiers: 0.84 per 100 for
+umpires, 0.81 for catchers, 0.59 for pitchers. Who is catching is worth roughly
+as much as who is calling, and who is throwing is not far behind.
+
+The pitcher column is the newest of the three and reads the way a scout would
+write it. The top is command-first strike-throwers — Petit, Chavez, Lester,
+Miley, Keuchel, Davies, deGrom. The bottom is heavy movement — Framber Valdez,
+Kikuchi, Steele, Lodolo, Crochet. A pitch that is still moving as it arrives
+gets fewer calls than its coordinates deserve, which is a plausible reading and
+not one the model was told.
 
 The catcher list is also the closest thing here to external validation. Nothing
 in this pipeline knows what pitch framing is — the model sees only location,
@@ -173,13 +190,13 @@ catchers. That is small against the extremes and not against the middle.
 Two things follow, and both are constraints on how the table above should be
 read:
 
-- **Only 80 of 129 umpires, and 127 of 205 catchers, are more than two standard
-  errors from zero.** The rest of each list is indistinguishable from having no
-  effect at all. Every name shown in the tables above clears that bar
-  comfortably; the middle of the leaderboard does not.
+- **Most of each list is not distinguishable from zero.** 79 of 129 umpires, 122
+  of 205 catchers and 208 of 573 pitchers clear two standard errors; the rest are
+  indistinguishable from having no effect at all. Every name shown in the tables
+  above clears that bar comfortably. The middle of each leaderboard does not.
 - **Adjacent ranks are not real.** Separating two people needs roughly 0.5 calls
   per 100 between them. Doug Eddings really is above Bill Miller, but Nick
-  Mahrley at +1.40 and Mike Estabrook at +1.38 are one person in two rows, and
+  Mahrley at +1.41 and Mike Estabrook at +1.37 are one person in two rows, and
   no amount of ranking them will change that.
 
 These are the standard errors of the shrunken estimate — they describe how much
@@ -207,7 +224,30 @@ the correction being small is a finding, and it isn't one you can assert
 without doing the fit. It would not stay small for a single season, or for a
 catcher who caught for one crew.
 
-### Catchers converged. Umpires did not.
+### How much of framing is really the pitcher
+
+Adding pitchers was meant to answer a specific worry: that a catcher's number
+was quietly absorbing his pitching staff's command. It does, but less than
+feared. Against the two-role fit, the catcher spread shrinks **4.0%** and the
+individual numbers correlate at 0.988, moving 0.09 per 100 at the median. The
+umpire column barely notices, shrinking 1.2% at a correlation of 0.999. The
+framing leaderboard survives: Flowers 2.59 to 2.56, Hedges 1.97 to 2.05.
+
+The exception proves the mechanism, and it is worth the detour. The biggest
+mover by a distance is **David Ross, whose framing number falls from +1.64 to
++0.95** once pitchers are in the fit. Ross was Jon Lester's personal catcher,
+and Lester lands at +2.10 on the pitcher list above. In this data **44.8% of
+every called pitch Ross caught was thrown by Lester**, against a median of 9.8%
+for a typical qualifying catcher's most-caught pitcher — the 99th percentile of
+battery concentration.
+
+So the confounding is real and it is specific. Catchers with normal, varied
+staffs barely move, because the pitchers average out the same way the partners
+did before. Catchers welded to one arm move a lot. A leaderboard without
+pitchers in it is not wrong everywhere; it is wrong exactly where a catcher
+caught the same man half the time.
+
+### The players converged. The umpires did not.
 
 The leaderboard above pools eleven seasons into one number per person, which
 hides whether the pool is changing. Refitting one season at a time answers that,
@@ -239,44 +279,56 @@ one helping from a replicate, as the definition of the statistic says to, and
 the bootstrap converges on the **uncorrected** standard deviation rather than on
 the statistic — about 0.11 too high, far enough that every point estimate landed
 outside its own percentile bounds. Replicates take the correction twice. After
-that the draws sit 0.006 from the statistic and every point estimate is inside
-its interval, so the bounds mean what they say and are free to be asymmetric.
+that the draws sit 0.03 from the statistic and all 33 point estimates are inside
+their intervals, so the bounds mean what they say and are free to be asymmetric.
 
 The standard errors behind that correction are closed-form and clustered on the
 game rather than bootstrapped, which is both faster and applies one estimator at
-both levels. They run about 1.07x the bootstrap errors — the gap is the ridge
-shrinkage the bootstrap sees and a plain mean does not — which pushes the
-reported spread down roughly 1%.
+both levels. They run about 1.10x the bootstrap errors — the gap is the ridge
+shrinkage the bootstrap sees and a plain mean does not.
 
 | | 2015 | 2025 | slope per season |
 | --- | --- | --- | --- |
-| catchers | 1.26 | 0.79 | **−0.053 ± 0.010** |
-| umpires | 1.14 | 0.84 | −0.012 ± 0.008 |
+| catchers | 1.22 | 0.74 | **−0.047 ± 0.009** |
+| pitchers | 0.82 | 0.58 | **−0.035 ± 0.009** |
+| umpires | 1.13 | 0.83 | −0.013 ± 0.008 |
 
-**The catcher spread has collapsed by about a third, and the trend is five
-standard errors from flat.** In 2017 the gap between a good and a bad framer was
-half again what it is now. That is consistent with framing becoming a known and
-priced skill over this period — teams that can measure it stop employing
-catchers who are bad at it — though this data can show only the compression, not
-the cause.
+**The catcher spread has collapsed by about 40%, and the trend is five standard
+errors from flat.** In 2016 the gap between a good and a bad framer was nearly
+twice what it is now. **Pitchers have compressed too**, from 0.82 to 0.58 at
+just under four standard errors. Both are consistent with these becoming known
+and priced skills over the period — a team that can measure framing stops
+employing catchers who are bad at it, and the same logic reaches command —
+though this data can show the compression and not the cause.
+
+The pitcher line deserves a caveat the other two do not. Its correction is
+subtracting most of the variance: a raw spread around 1.1 against a median
+standard error of 0.84, so the reported 0.5 to 0.8 is a difference between two
+similar numbers. The intervals show it, touching zero in three seasons. The
+direction is well established; the level is not.
 
 **The umpire spread is not established as moving.** The end points tempt a
-different story: 1.14 down to 0.84 reads as a 27% decline. But the slope is
-−0.012 ± 0.008, and the middle of the series wobbles between 0.92 and 1.06 with
+different story: 1.13 down to 0.83 reads as a 27% decline. But the slope is
+−0.013 ± 0.008, and the middle of the series wobbles between 0.91 and 1.06 with
 no direction — 2023 and 2024 are both *higher* than 2017, and their bands
 overlap almost everything.
 
-That is 1.6 standard errors, which is short of the conventional bar but close
+That is 1.7 standard errors, which is short of the conventional bar but close
 enough that "umpires are not converging" would be overclaiming in the other
 direction. The honest reading is that eleven seasons cannot separate a slow
-umpire convergence from none at all, while the same eleven seasons settle the
-catcher question five times over.
+umpire convergence from none at all, while the same eleven seasons settle both
+player questions.
 
-That conclusion has now survived three different ways of estimating the
-uncertainty — equal weights, precision weights from a nested bootstrap, and
-precision weights from the corrected one — which moved the umpire slope between
-−0.012 and −0.014 and never moved it across the bar. The season estimates are
-precise enough that the choice did not matter.
+The contrast is the interesting part. Everyone here is being graded — MLB grades
+its umpires too — but the two groups a front office can hire and release have
+visibly compressed, and the group it cannot has not. That is what selection
+looks like when it is available on one side of the plate and not the other.
+
+The umpire conclusion has now survived four different ways of estimating the
+uncertainty — equal weights, precision weights from a nested bootstrap,
+precision weights from the corrected one, and the whole thing refitted with
+pitchers in the model — which moved the slope between −0.012 and −0.014 and
+never moved it across the bar.
 
 ## Poking at it yourself
 
@@ -354,13 +406,13 @@ uv run python src/mlb_strikezone/app.py --check
   efficient. The standard errors are bootstrapped rather than read off the fit,
   so they do not inherit that inefficiency, but they describe the shrunken
   estimate and not the shrinkage bias.
-- A catcher's effect absorbs anything correlated with him that the model does
-  not see — his pitching staff's command, his team's park, the pitch mix he
-  calls. It is a catcher-shaped residual, not a measurement of framing skill in
-  isolation.
-- Umpire and catcher are separable only because crews and catchers cross over
-  across eleven seasons. Over one season, or for a catcher who caught for a
-  single crew, they would not be.
+- A catcher's effect still absorbs anything correlated with him that the model
+  does not see. The pitcher is now controlled for, but his team's park and the
+  pitch mix he calls are not. It is a catcher-shaped residual, not a measurement
+  of framing skill in isolation.
+- The three roles are separable only because crews, catchers and staffs cross
+  over across eleven seasons. Over one season, or for a catcher welded to one
+  pitcher, they are not — which is exactly what the David Ross case above shows.
 
 ## Next
 
@@ -368,8 +420,10 @@ The pipeline is complete end to end: ingest, called-pitch table, umpires,
 descriptive zone, model, attribution. What would sharpen it, roughly in order
 of value per unit of work:
 
-- **Catcher effects absorb their pitching staff.** A catcher's number carries
-  anything correlated with him that the model cannot see — his staff's command,
-  his park, the pitch mix he calls. Adding pitcher effects to the joint fit
-  would separate framing from the men being framed for, at the cost of a third
-  set of effects competing for the same variance.
+- **Batter effects.** The one participant still unmodelled. A hitter who takes
+  close pitches presents the umpire with a different mix than one who swings at
+  them, and any of that which survives the location model is currently sitting
+  in someone else's column.
+- **Park effects.** Sightlines and backdrops differ, and every catcher plays half
+  his games in one building, so park is confounded with catcher in the same way
+  the pitcher was.
