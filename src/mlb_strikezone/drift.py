@@ -17,6 +17,7 @@ from mlb_strikezone.attribution import (
     UMPIRES,
     bootstrap_standard_errors,
     build_design,
+    cluster_robust_se,
     fit_joint,
     games_as_row_blocks,
 )
@@ -35,19 +36,19 @@ SEASON_ALPHA = 100
 SEASON_MIN_PITCHES = 1000
 BOOTSTRAP_REPLICATES = 100
 
-# The interval on a season's spread is nested: the outer loop resamples games,
-# and each outer replicate needs its own standard errors before its spread can
-# be corrected. Inner stays small because it only has to pin an average of
-# squared errors over ~90 people, which is far easier than pinning any one.
+# The interval on a season's spread resamples games once. Correcting a
+# replicate's spread needs the standard errors of its effects, and those come
+# from the closed-form clustered estimator rather than a second bootstrap, which
+# is both faster and applies the identical estimator at both levels.
 #
-# Only the width of that distribution is used. Its centre sits roughly 15% above
-# the statistic, because an inner bootstrap drawn from an already-resampled set
-# of games understates that replicate's noise, so every replicate under-corrects
-# and lands high. That is an artefact of nesting rather than anything about the
-# season, so percentile bounds would be misleading and the interval is built as
-# the point estimate plus and minus two bootstrap standard errors.
-OUTER_REPLICATES = 100
-INNER_REPLICATES = 15
+# The correction is doubled inside a replicate, and that is the part that
+# matters. A replicate is noisy about the observed effects, which are themselves
+# noisy about the truth, so it carries two helpings of estimation error. Taking
+# out only one leaves the draws sitting on the raw standard deviation, about
+# 0.11 above the statistic, far enough that every point estimate landed outside
+# its own percentile bounds.
+OUTER_REPLICATES = 300
+INTERVAL = (5, 95)
 
 SHORT_SEASON = 2020
 
@@ -61,14 +62,20 @@ def load():
     return df
 
 
-def corrected_spread(effect, se):
+def corrected_spread(effect, se, doses=1):
     """Standard deviation of the true effects, with estimation noise removed.
 
     The observed spread of estimates carries its own standard errors on top of
     the real variation, and carries more of them in a season with less data.
     Subtracting the mean squared error is what stops the shortest season looking
-    like the most variable one purely because it is the shortest."""
-    variance = effect.var(ddof=1) - np.mean(np.asarray(se) ** 2)
+    like the most variable one purely because it is the shortest.
+
+    `doses` is how many helpings of that noise the input carries. Real estimates
+    carry one. A bootstrap replicate carries two — the sampling noise already in
+    the observed effects, plus the noise of resampling them — so subtracting one
+    from a replicate leaves a whole helping behind, and the bootstrap converges
+    on the raw standard deviation rather than on the statistic itself."""
+    variance = effect.var(ddof=1) - doses * np.mean(np.asarray(se) ** 2)
     return float(np.sqrt(max(variance, 0.0)))
 
 
@@ -82,11 +89,28 @@ def season_effects(df, season):
         on=["role", "id"],
     )
 
-    counts = []
+    extra = []
     for column, role in ROLES.items():
         sized = slice_.groupby(column).size()
-        counts.append(pd.DataFrame({"role": role, "id": sized.index, "pitches": sized.to_numpy()}))
-    return effects.merge(pd.concat(counts, ignore_index=True), on=["role", "id"]).assign(
+        # The spread correction uses this closed-form error, not the bootstrap
+        # one above, so that the point estimate and the replicates behind its
+        # interval are computed the same way. The bootstrap column stays as the
+        # check on it.
+        analytic = cluster_robust_se(
+            slice_[column].to_numpy(), slice_["game_pk"].to_numpy(),
+            slice_["residual"].to_numpy(),
+        )
+        extra.append(
+            pd.DataFrame(
+                {
+                    "role": role,
+                    "id": sized.index,
+                    "pitches": sized.to_numpy(),
+                    "se_analytic": analytic.reindex(sized.index).to_numpy(),
+                }
+            )
+        )
+    return effects.merge(pd.concat(extra, ignore_index=True), on=["role", "id"]).assign(
         season=season
     )
 
@@ -95,27 +119,25 @@ def _resample(blocks, picked):
     return np.concatenate([blocks[game] for game in picked])
 
 
-def spread_bootstrap(df, season, outer=OUTER_REPLICATES, inner=INNER_REPLICATES, seed=0):
+def spread_bootstrap(df, season, outer=OUTER_REPLICATES, seed=0):
     """Bootstrap distribution of each role's corrected spread for one season.
 
-    Nested rather than single-level, because the spread is not a mean. It is a
-    variance with the estimation noise subtracted, and that subtraction needs the
-    standard errors of the effects, which are themselves a bootstrap. Every outer
-    replicate therefore re-estimates them from its own resampled games. Reusing
-    the full sample's standard errors would apply one estimator to the point
-    estimate and a different one to the replicates, and the interval would
-    describe neither."""
+    Each replicate resamples games, refits, and computes the standard errors it
+    needs in closed form from that same resample — the identical estimator the
+    point estimate uses, which is what keeps the distribution centred on it."""
     slice_ = df[df["season"] == season]
     design, encoder = build_design(slice_)
     residual = slice_["residual"].to_numpy()
     blocks = games_as_row_blocks(slice_)
-    columns = {
-        "umpire": slice(0, len(encoder.categories_[0])),
-        "catcher": slice(len(encoder.categories_[0]), None),
+    lengths = np.array([len(block) for block in blocks])
+    split_at = len(encoder.categories_[0])
+    roles = {
+        "umpire": (slice(0, split_at), slice_["ump_id"].to_numpy(), encoder.categories_[0]),
+        "catcher": (slice(split_at, None), slice_["fielder_2"].to_numpy(), encoder.categories_[1]),
     }
     rng = np.random.default_rng(seed)
 
-    draws = {role: np.empty(outer) for role in columns}
+    draws = {role: np.empty(outer) for role in roles}
     for replicate in range(outer):
         picked = rng.integers(0, len(blocks), len(blocks))
         rows = _resample(blocks, picked)
@@ -123,25 +145,26 @@ def spread_bootstrap(df, season, outer=OUTER_REPLICATES, inner=INNER_REPLICATES,
         # One-hot columns sum to each person's pitch count, so the qualification
         # floor can be reapplied per replicate without touching the frame.
         counts = np.asarray(design[rows].sum(axis=0)).ravel()
+        # A game drawn twice is two clusters, not one, so the cluster label is
+        # the draw's position rather than the game it came from.
+        cluster = np.repeat(np.arange(len(picked)), lengths[picked])
 
-        inner_draws = np.empty((inner, design.shape[1]))
-        for step in range(inner):
-            repicked = picked[rng.integers(0, len(picked), len(picked))]
-            inner_rows = _resample(blocks, repicked)
-            inner_draws[step] = (
-                Ridge(alpha=SEASON_ALPHA).fit(design[inner_rows], residual[inner_rows]).coef_
+        for role, (span, people, categories) in roles.items():
+            se = (
+                cluster_robust_se(people[rows], cluster, residual[rows])
+                .reindex(categories)
+                .to_numpy()
             )
-        se = inner_draws.std(axis=0, ddof=1)
-
-        for role, span in columns.items():
             keep = counts[span] >= SEASON_MIN_PITCHES
-            draws[role][replicate] = corrected_spread(effect[span][keep], se[span][keep])
+            # Two doses: a replicate is noisy about the observed effects, which
+            # are themselves noisy about the truth.
+            draws[role][replicate] = corrected_spread(effect[span][keep], se[keep], doses=2)
     return draws
 
 
 def summarise_bootstrap(draws, season):
-    """Width of the bootstrap distribution, and where it sits relative to the
-    statistic so the shift stays visible rather than being quietly absorbed."""
+    """Width and percentile bounds, plus where the distribution sits relative to
+    the statistic so any residual shift stays visible rather than absorbed."""
     rows = []
     for role, values in draws.items():
         rows.append(
@@ -150,6 +173,8 @@ def summarise_bootstrap(draws, season):
                 "role": role,
                 "spread_se": values.std(ddof=1) * 100,
                 "draw_median": np.median(values) * 100,
+                "lo": np.percentile(values, INTERVAL[0]) * 100,
+                "hi": np.percentile(values, INTERVAL[1]) * 100,
             }
         )
     return pd.DataFrame(rows)
@@ -165,8 +190,12 @@ def spread_by_season(effects):
                 "role": role,
                 "people": len(qualified),
                 "raw_sd": qualified["effect"].std(ddof=1) * 100,
-                "spread": corrected_spread(qualified["effect"], qualified["se"]) * 100,
-                "median_se": qualified["se"].median() * 100,
+                "spread": corrected_spread(qualified["effect"], qualified["se_analytic"]) * 100,
+                "median_se": qualified["se_analytic"].median() * 100,
+                # Ratio of the closed-form error to the bootstrap one. Around
+                # 1.07 is expected: the bootstrap sees a shrunken estimator and
+                # the closed form describes a plain mean.
+                "se_ratio": (qualified["se_analytic"] / qualified["se"]).median(),
             }
         )
     return pd.DataFrame(rows).sort_values(["role", "season"])
@@ -212,7 +241,10 @@ def figure_spread(spreads, path):
     ax.set_ylim(bottom=0)
     ax.set_xlabel("season")
     ax.set_ylabel("spread between people, per 100 called pitches")
-    ax.set_title("Noise-corrected spread by season, ±2 SE (hollow = 2020, 60 games)")
+    ax.set_title(
+        f"Noise-corrected spread by season, {INTERVAL[1] - INTERVAL[0]}% interval "
+        "(hollow = 2020, 60 games)"
+    )
     ax.legend(fontsize=9)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
@@ -227,7 +259,7 @@ def fit_and_save():
     effects, intervals = [], []
     for season in seasons:
         print(f"fitting {season}: {BOOTSTRAP_REPLICATES} replicates for the effects, "
-              f"then {OUTER_REPLICATES}x{INNER_REPLICATES} nested for the spread...")
+              f"then {OUTER_REPLICATES} for the spread interval...")
         effects.append(season_effects(df, season))
         intervals.append(summarise_bootstrap(spread_bootstrap(df, season), season))
 
@@ -242,8 +274,6 @@ def report():
     spreads = spread_by_season(effects).merge(
         pd.read_parquet(SEASON_SPREADS), on=["season", "role"], how="left"
     )
-    spreads["lo"] = spreads["spread"] - 2 * spreads["spread_se"]
-    spreads["hi"] = spreads["spread"] + 2 * spreads["spread_se"]
     for role in ROLES.values():
         print(f"\n{role}s, spread by season (per 100 called pitches, "
               f"n >= {SEASON_MIN_PITCHES:,})")
@@ -254,9 +284,11 @@ def report():
         )
 
     lift = (spreads["draw_median"] - spreads["spread"]).mean()
-    print(f"\nnested bootstrap draws sit {lift:+.3f} above the statistic on average, an "
-          "artefact of\nresampling twice; intervals use the width of that distribution, "
-          "not its position")
+    outside = ((spreads["spread"] < spreads["lo"]) | (spreads["spread"] > spreads["hi"])).sum()
+    print(f"\nbootstrap draws sit {lift:+.3f} from the statistic on average; "
+          f"{outside} of {len(spreads)} point estimates fall outside their own interval")
+    print(f"closed-form errors run {spreads['se_ratio'].median():.2f}x the bootstrap ones, "
+          "the gap being the shrinkage the bootstrap sees and a plain mean does not")
 
     print("\ntrend in spread per season, 2020 excluded as a 60-game season")
     full = spreads[spreads["season"] != SHORT_SEASON]
@@ -305,6 +337,23 @@ def _self_check():
 
     # All noise and no signal clamps at zero rather than returning a NaN.
     assert corrected_spread(rng.normal(0, 0.005, 500), np.full(500, 0.05)) == 0.0
+
+    # A bootstrap replicate is noisy about the observed effects, which are
+    # already noisy about the truth, so it carries two helpings of error. The
+    # single correction leaves one behind and lands on the raw standard
+    # deviation; only the double correction returns to the statistic.
+    noise = 0.006
+    se = np.full(len(truth), noise)
+    observed = truth + rng.normal(0, noise, len(truth))
+    replicate = observed + rng.normal(0, noise, len(truth))
+
+    statistic = corrected_spread(observed, se)
+    assert abs(corrected_spread(replicate, se, doses=2) - statistic) < 0.0005, statistic
+    single = corrected_spread(replicate, se, doses=1)
+    assert abs(single - observed.std(ddof=1)) < 0.0005, single
+    # The leftover helping adds in quadrature, not linearly.
+    assert single > statistic
+    assert abs(single - np.hypot(statistic, noise)) < 0.0005, (single, statistic)
 
     # A flat series must not be reported as a trend, and a real slope must be.
     seasons = pd.DataFrame({"season": np.arange(2015, 2025)})
